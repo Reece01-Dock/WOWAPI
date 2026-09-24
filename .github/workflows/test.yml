@@ -18,6 +18,14 @@ jobs:
         run: ${{ matrix.lua }} ./wowtest test
       - name: Smoke-test every addon
         run: |
+          mkdir -p screenshots
           for d in addons/*/; do
-            ${{ matrix.lua }} ./wowtest check "$d" || exit 1
+            name=$(basename "$d")
+            ${{ matrix.lua }} ./wowtest check "$d" --screenshot "screenshots/$name.svg" || exit 1
           done
+      - name: Upload UI screenshots
+        if: matrix.lua == 'lua5.1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots/

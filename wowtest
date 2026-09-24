@@ -150,6 +150,8 @@ Logged in as ]] .. sim.player.name .. [[ (]] .. sim.player.class .. [[ ]] .. sim
   target <name>        set a target                 report           errors, stubs, leaks
   hover <Frame>        mouse over a frame           drag <F> <dx> <dy>  drag a frame
   mouse <x> <y>        move the mouse               screenshot [file.svg]  render the UI
+  clickat <x> <y>|<F>  real click (what's on top)   key <KEY>        press a key, e.g. key CTRL-F
+  type <text>          type into focused edit box   menu [item]      show / pick from the open menu
   quit                 log out and save SavedVariables to ]] .. flags.wtf)
   while true do
     io.write("> ")
@@ -202,6 +204,17 @@ Logged in as ]] .. sim.player.name .. [[ (]] .. sim.player.class .. [[ ]] .. sim
       if name then sim:Drag(name, tonumber(dx), tonumber(dy)) else print("Usage: drag <Frame> <dx> <dy>") end
     elseif cmd == "hover" then
       sim:Hover(rest)
+    elseif cmd == "key" then
+      sim:PressKey(rest)
+    elseif cmd == "type" then
+      sim:TypeText(rest)
+    elseif cmd == "clickat" then
+      local x, y = rest:match("(%-?[%d.]+)%s+(%-?[%d.]+)")
+      local f = x and sim:ClickAt(tonumber(x), tonumber(y)) or (not x and sim:ClickAt(rest))
+      print("Clicked: " .. (f and f:GetDebugName() or "nothing"))
+    elseif cmd == "menu" then
+      if rest ~= "" then sim:ChooseMenuItem(rest)
+      else for _, e in ipairs(sim:MenuItems()) do print(string.rep("  ", e.depth) .. (e.selected and "(*) " or "") .. tostring(e.text or ("<" .. e.kind .. ">"))) end end
     elseif cmd == "report" then
       print(sim:Report())
     else

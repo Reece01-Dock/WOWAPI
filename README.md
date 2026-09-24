@@ -1,19 +1,35 @@
-# WOWAPI: test harness for WoW: Forever addons
+# WOWAPI: a WoW: Forever client simulator for addon development
 
-Write and test **World of Warcraft: Forever** addons without launching the game.
+Write, test and debug **World of Warcraft: Forever** addons without launching the game.
 
-`wowapi` is a small WoW client emulator written in plain Lua 5.1, the same Lua version the game uses. It loads
-your addon from its `.toc` file and runs your Lua against a fake copy of the game API: frames, events, timers, slash
-commands, SavedVariables, units and chat. That lets you:
+`wowapi` is a WoW client emulator written in plain Lua 5.1, the same Lua the game runs. It loads your addon from its
+`.toc` exactly like the client and runs it against a simulated game. The simulation covers:
 
-- **Write unit tests** for your addon (`./wowtest test`)
-- **Smoke-test** any addon folder and get a report of Lua errors, missing API calls and leaked globals (`./wowtest check`)
-- **Try your addon interactively**: type `/commands`, fire events, click buttons and `/reload` in a terminal (`./wowtest run`)
+- the whole documented API
+- frames with real layout, drawn to screenshots
+- XML UI
+- events, timers and animations
+- mouse, keyboard and key bindings
+- combat lockdown and secure frames
+- SavedVariables and `/reload`
 
-It targets WoW: Forever's client: **Interface `16001`** on the mainline (12.x) API. That means `C_AddOns`,
-`C_Timer`, `C_Spell`, `C_Item`, `C_UnitAuras`, `Settings`, `EventUtil` and similar. Legacy globals removed from the
-mainline client (`GetAddOnMetadata`, `GetSpellInfo` and others) are deliberately **left out**, so an addon that uses
-them fails here the same way it would in game. Pass `--legacy` or `{ legacyGlobals = true }` if you still want them.
+Use it to:
+
+- **Unit-test your addon** (`./wowtest test`): click buttons, type slash commands, enter combat, advance time,
+  reload the UI, and assert on the result.
+- **Smoke-test any addon** (`./wowtest check`): get a report of Lua errors, blocked actions, leaked globals and
+  API calls that aren't emulated, plus an optional screenshot.
+- **Play with it interactively** (`./wowtest run`): a terminal "client" where you type `/commands`, press keys,
+  click, drag, fire events and take screenshots.
+
+## Target client
+
+| | |
+|---|---|
+| Client | WoW: Forever, **Interface `16001`**, mainline (12.x) UI and API |
+| Game type | **`camelot`**: `.toc` lines with `[AllowLoadGameType camelot]` load, `[ExcludeLoadGameType …]` is honoured, retail-only `standard` lines don't load |
+| API data | Generated from Blizzard's own API documentation (`wow-ui-source` 12.1.0) and [BlizzardInterfaceResources](https://github.com/Ketho/BlizzardInterfaceResources) |
+| Removed legacy globals | `GetAddOnMetadata`, `GetSpellInfo`, `GetItemInfo`, `UnitAura` and similar are **absent**, like on the live 12.x client. Pass `--legacy` / `{ legacyGlobals = true }` to add them back |
 
 ## Requirements
 
@@ -27,28 +43,27 @@ brew install lua@5.1         # macOS (or: brew install luajit)
 ## Quick start
 
 ```sh
-./wowtest test                          # run every *_spec.lua under addons/ and spec/
-./wowtest new MyAddon                   # scaffold addons/MyAddon with a .toc, code and a test
-./wowtest test addons/MyAddon           # run that addon's tests
-./wowtest check addons/MyAddon          # load + login + try every slash command, then report
-./wowtest run addons/HelloForever --name Thrall --class SHAMAN   # interactive session
+./wowtest test                                 # run every *_spec.lua under addons/ and spec/
+./wowtest new MyAddon                          # scaffold addons/MyAddon with a .toc, code and a test
+./wowtest test addons/MyAddon                  # run one addon's tests
+./wowtest check path/to/AddOns/SomeAddon --screenshot ui.svg
+./wowtest run addons/HelloForever --name Thrall --class SHAMAN
 ```
 
-`addons/HelloForever` is a complete example. It has events, SavedVariables, slash commands, a UI window, `OnUpdate`,
-`C_Timer`, tooltips and combat detection, and its spec in `addons/HelloForever/tests/` tests all of it.
+`addons/HelloForever` is a complete example addon with tests: events, SavedVariables, slash commands, a UI window,
+`OnUpdate`, `C_Timer`, tooltips and combat. `spec/fixtures/XmlAddon` shows an XML-based UI with mixins, templates,
+animations and `Bindings.xml`.
 
 ## Writing tests
 
-Put `*_spec.lua` files anywhere inside your addon folder (for example `MyAddon/tests/MyAddon_spec.lua`). The runner
-finds the addon's `.toc` by walking up from the spec file.
+Put `*_spec.lua` files anywhere inside your addon folder. The runner walks up from each spec file to find the addon's
+`.toc`.
 
 ```lua
 describe("MyAddon", function()
   local sim
-
   before_each(function()
-    sim = Boot({ player = { name = "Jaina", class = "MAGE", level = 60 } })
-    -- Boot() = new simulated client + load this addon (and its deps) + log in
+    sim = Boot({ player = { name = "Jaina", class = "MAGE", level = 60 } })  -- load addon + log in
   end)
 
   it("greets on login", function()
@@ -61,10 +76,18 @@ describe("MyAddon", function()
     expect(sim:Get("MyAddonDB").enabled).to_be(false)
   end)
 
-  it("reminds after 10 seconds", function()
-    sim:Slash("/myaddon remind 10 drink")
-    sim:Advance(10)                      -- runs OnUpdate + C_Timer
-    expect(sim:LastChat()).to_be("Reminder: drink")
+  it("has a working window", function()
+    local win = sim:Get("MyAddonFrame")
+    sim:Drag(win, 100, 0)                 -- real drag: OnDragStart, StartMoving, re-anchoring
+    sim:ClickAt(win.CloseButton)          -- real click at the button's position
+    expect(win:IsShown()).to_be(false)
+    sim:Screenshot("window.svg")          -- look at it in a browser
+  end)
+
+  it("doesn't touch protected frames in combat", function()
+    sim:EnterCombat()
+    sim:Slash("/myaddon move")
+    expect(#sim:BlockedActions()).to_be(0)
   end)
 end)
 ```
@@ -73,90 +96,163 @@ end)
 an event handler (in game it would only show up in the error frame). If a test expects an error, call
 `sim:ClearErrors()` before the test ends.
 
-### Spec globals
+**Spec globals**
+- `describe`, `it`, `pending`, `before_each`, `after_each`
+- `expect(v)` with `.to_be`, `.to_equal` (deep), `.to_be_truthy`, `.to_be_falsy`, `.to_be_nil`, `.to_be_type`,
+  `.to_contain`, `.to_match`, `.to_have_length`, `.to_be_greater_than`, `.to_be_less_than`, `.to_be_close_to` and
+  `.to_error`. Put `.never` before any of them to negate it.
+- `Boot(opts)`: a new client with this addon loaded and logged in.
+- `NewSim(opts)`: a new client with nothing loaded. It can still find this addon and its sibling folders, which
+  is how dependencies get resolved.
+- `WoW`: the module itself.
+- `ADDON_DIR` and `SPEC_DIR`: paths.
 
-| Name | What it is |
+## The simulated client (`sim`)
+
+`WoW.new(opts)` accepts these options:
+
+- `player = { name, realm, class, race, faction, level, health, healthMax, power, powerMax, money, guild, zone, spec, auras = {...}, ... }`
+- `locale` (default `"enUS"`)
+- `items = { [id] = {...} }` and `spells = { [id] = {...} }`
+- `seed`, for `math.random`
+- `savedVariablesDir`: read and write real WTF files
+- `frameTime` (default 1/32 s)
+- `legacyGlobals`
+- `strictArgs` (default true): API argument checking
+- `secretValues`
+- `projectId`: the value of `WOW_PROJECT_ID`
+- `extraEvents`
+- `quiet`
+
+| Area | Methods |
 |---|---|
-| `describe`, `it`, `pending`, `before_each`, `after_each` | Test structure |
-| `expect(v)` | `.to_be`, `.to_equal` (deep), `.to_be_truthy`, `.to_be_falsy`, `.to_be_nil`, `.to_be_type`, `.to_contain`, `.to_match`, `.to_have_length`, `.to_be_greater_than`, `.to_be_less_than`, `.to_be_close_to`, `.to_error`. Put `.never` before any of these to negate it. |
-| `Boot(opts)` | New client with this addon loaded and logged in |
-| `NewSim(opts)` | New client, nothing loaded yet (can find this addon and its sibling folders) |
-| `WoW` | The `wowapi` module (`WoW.new(opts)`, `WoW.toc`, `WoW.serialize`) |
-| `ADDON_DIR`, `SPEC_DIR` | Paths |
+| Addons & session | `LoadAddon(dirOrName)` → `ok, ns` · `LoadAllAddons(dir)` · `Login()` · `Logout()` · `Reload()` · `NS(name)` |
+| Events & time | `FireEvent(event, ...)` · `EventCount(event)` · `Advance(seconds)` (runs `OnUpdate`, timers, animations) |
+| Chat & commands | `Slash("/cmd args")` (plus built-in `/reload`, `/run`, `/dump`) · `ChatContains(pattern, plain)` · `LastChat()` · `ChatText()` · `ClearChat()` |
+| Mouse | `MoveMouse(x, y)` (fires OnEnter/OnLeave) · `ClickAt(x, y or frame, button)` (hits whatever is on top and respects `RegisterForClicks`) · `Click(frame)` · `Hover(frame)` · `Leave(frame)` · `Drag(frame, dx, dy)` · `Scroll(frame, delta)` · `FrameAt(x, y)` |
+| Keyboard | `PressKey("CTRL-SHIFT-F")`: the full client input chain (focused EditBox, keyboard-enabled frames, ESC closing `UISpecialFrames`, override and normal bindings) · `TypeText(text)` · `SetModifier("shift", true)` · `SetBinding(key, action)` · `Type(editBox, text)` · `PressEnter(eb)` |
+| Combat & security | `EnterCombat()` / `LeaveCombat()` (lockdown starts after `PLAYER_REGEN_DISABLED`, like the client) · `BlockedActions()` · `secureActions` (what secure buttons cast or used) · `SetSecretRestrictions(on)` |
+| World | `SetTarget(data)` · `SetUnit("party1", data)` · `AddItem(id, info)` · `AddSpell(id, info)` · `bags[bag][slot] = {...}` · `CombatLog("SPELL_DAMAGE", { source = "player", dest = "target", spellId = 133, amount = 1200 })` |
+| Menus | `MenuItems()` · `ChooseMenuItem(text)`, for MenuUtil context menus and `WowStyle1DropdownTemplate` dropdowns |
+| API | `Mock("C_Map.GetBestMapForUnit", 2112)` · `Mock("UnitHealth", fn)` · `Unmock(key)` · `Calls(key)` · `CallCount(key)` · `Doc("Frame:SetPoint")` (the documented signature) |
+| Inspection | `Get(name)` · `Exec(lua)` · `Screenshot(path, { outlines = true })` · `LeakedGlobals(addon)` · `Report()` · `errors` · `ClearErrors()` · `AssertNoErrors()` · `sentChat` · `addonMessages` · `sounds` · `popups` · `uiErrors` |
 
-### The simulated client (`sim`)
+Screen coordinates are UIParent's 1920×1080, with the origin at the bottom-left, as in the client.
 
-**Setup**: `WoW.new(opts)` accepts these options:
-`player = { name, realm, class, race, faction, level, health, healthMax, power, powerMax, money, guild, zone, spec, auras = {...} }`,
-`locale = "enUS"`, `items = { [id] = {name=, quality=, ...} }`, `spells = { [id] = {name=, ...} }`, `seed` (for
-`math.random`), `legacyGlobals`, `savedVariablesDir` (read/write real WTF files), `frameTime` (default 1/32s), `quiet`.
+## What's simulated
 
-| Method | Does |
-|---|---|
-| `sim:LoadAddon(dirOrName)` | Load an addon: dependencies, files, XML `<Script>`s, SavedVariables, then `ADDON_LOADED`. Returns `ok, ns`, where `ns` is the addon's private table (`local _, ns = ...`) |
-| `sim:Login()` / `sim:Logout()` / `sim:Reload()` | Login events, logout (writes SavedVariables), full `/reload` with a fresh Lua state |
-| `sim:FireEvent(event, ...)` | Fire a game event (`RegisterUnitEvent` filters are respected) |
-| `sim:Advance(seconds)` | Move game time forward. `OnUpdate` scripts run on visible frames and timers fire |
-| `sim:Slash("/cmd args")` | Type a slash command (`/reload`, `/run`, `/dump` are built in) |
-| `sim:Click(frameOrName, button)`, `sim:Hover(f)`, `sim:Leave(f)` | Mouse input |
-| `sim:Type(editBox, text)`, `sim:PressEnter(eb)`, `sim:PressEscape(eb)` | Keyboard input |
-| `sim:EnterCombat()` / `sim:LeaveCombat()` | Combat events + `InCombatLockdown()` |
-| `sim:SetTarget(data)`, `sim:SetUnit("party1", data)` | Other units |
-| `sim:AddItem(id, info)`, `sim:AddSpell(id, info)`; `sim.bags[bag][slot] = { itemID=, stackCount= }` | Game data |
-| `sim:Get(name)` | Read a global from the game environment |
-| `sim:Exec(luaCode)` | Run Lua inside the game. Returns `ok, results...` |
-| `sim:NS(addonName)` | An addon's private namespace table |
-| `sim:ChatContains(pattern, plain)`, `sim:LastChat()`, `sim:ChatText()`, `sim:ClearChat()` | What the addon printed (color codes stripped) |
-| `sim.sentChat`, `sim.addonMessages`, `sim.sounds`, `sim.popups`, `sim.uiErrors` | Things the addon sent or showed |
-| `sim.errors`, `sim:ClearErrors()`, `sim:AssertNoErrors()` | Captured Lua errors |
-| `sim:LeakedGlobals(addon)` | Globals your addon created by accident (forgot `local`) |
-| `sim:Report()` | Summary of errors, warnings, stubbed calls and undefined globals |
+**The API**
 
-## What's emulated
+- All **4,871 documented functions** in 12.1, and every **event, enum, structure and widget method** (79 widget
+  API tables). Calls are argument-checked against the documentation, like the client. Registering an event
+  that doesn't exist errors, and a typo in a method name is `nil`.
+- Commonly used functions have real behaviour: units, auras, items, spells, bags, map, addons, CVars, chat, timers,
+  colors, `Settings`, `EventRegistry`/`EventUtil`, popups and more.
+- Everything else returns typed "empty game" defaults (`0`, `""`, `false`, `{}`, or a filled-in structure) and can
+  be mocked.
+- All **6,682 global functions** and **4,888 FrameXML functions** the live client defines exist. The ones that aren't
+  emulated are recorded no-ops, listed by `check` under "stubbed".
+- Also included: the full `Enum` and `Constants` tables, `LE_*` constants, CVar defaults, **all 24,665 GlobalStrings**
+  (`TANK`, `ERR_*` and so on), every Blizzard template and font object, and placeholders for Blizzard's named
+  frames, including action buttons.
+- FrameXML utilities: `Mixin`, `CreateFramePool` and the other pools, `CallbackRegistryMixin`, `Item`/`Spell`
+  mixins, `MenuUtil`, `PixelUtil`, `SecondsToTime` and similar, `BackdropTemplateMixin` (as in retail,
+  `SetBackdrop` needs `BackdropTemplate`), and the combat log.
 
-- **Lua**: WoW's Lua 5.1 sandbox without `io`, `os` or `require`. It adds `strsplit`/`strjoin`/`strtrim` with WoW's
-  semantics, `tinsert`, `wipe`, `tContains`, `CopyTable`, `bit`, and degree-based `sin`/`cos`, plus `date`, `time`,
-  `GetTime` and `debugprofilestop` on a deterministic clock.
-- **Frames**: `CreateFrame` for Frame, Button, CheckButton, StatusBar, Slider, EditBox, ScrollFrame, Cooldown,
-  GameTooltip and (Scrolling)MessageFrame, plus FontStrings, Textures and `CreateFont`. Behaviour covered: show/hide
-  with `OnShow`/`OnHide`, parent visibility, points and sizes, `SetScript`/`HookScript`, events, values, text and
-  checked state. Common templates add their child regions (`UICheckButtonTemplate.Text`, `UIPanelButtonTemplate`,
-  `OptionsSliderTemplate`, `BasicFrameTemplate`, ...).
-- **Events**: ordered dispatch, `RegisterUnitEvent`, `RegisterAllEvents`, `EventRegistry`, `EventUtil`.
-  - Login order: `ADDON_LOADED` (per addon), then `SPELLS_CHANGED`, `PLAYER_LOGIN`,
-    `PLAYER_ENTERING_WORLD(isInitialLogin, isReload)` and `VARIABLES_LOADED`.
-  - Logout order: `PLAYER_LEAVING_WORLD`, then `PLAYER_LOGOUT`.
-- **Time**: `C_Timer.After`, `NewTimer` and `NewTicker` (all cancellable), and `OnUpdate`.
-- **Addons**: `.toc` metadata, `Dependencies`/`OptionalDeps`, `[AllowLoadGameType]`, `Name_Forever.toc`/`_Mainline`
-  flavor files, `C_AddOns.*`, and SavedVariables (account and per-character) that survive `/reload` and can be
-  written to disk.
-- **Game state**: units, class colors, money, items, spells, auras, bags, map position, combat, group, CVars,
-  `StaticPopup`, chat filters, addon messages, the `Settings` panel API and `AddonCompartmentFrame`.
+**Frames and rendering**
 
-**Not emulated**: rendering and layout math, XML frame definitions (the `<Script file>` and `<Include file>` tags
-inside XML are followed, and XML frames produce a warning), secure/protected action restrictions, and real game data.
-A real WoW widget method that has no behaviour here is a recorded no-op. `check` lists these calls under "stubbed" so
-you know which parts still need an in-game check. A method name that doesn't exist in WoW is `nil`, so typos fail here
-the same way they fail in game.
+- Real layout: anchors, `SetAllPoints`, sizes, scale, and FontString and tooltip auto-sizing. `GetLeft`/`GetRect`
+  and the rest are correct, and anchor loops error.
+- Strata and frame levels for hit-testing and draw order.
+- `sim:Screenshot()` renders the visible UI to SVG: backdrops, color textures, status bars, sliders, edit boxes,
+  buttons, checkboxes, tooltips, text with `|c` colors, and optional frame outlines. Game art files can't ship
+  here, so file textures render as labelled placeholders.
 
-If your addon needs an API that isn't here, `./wowtest check` lists it under *"Globals read but not defined"*. Add it in
-`wowapi/api.lua`.
+**XML**
+
+- Every frame type: `<Layers>`, `<Frames>`, `<Anchors>` (`relativeTo`, `relativeKey`), `<Size>`, `<Scripts>` (inline,
+  `function=`, `method=`, `inherit=prepend/append`), `<KeyValues>`, `<Attributes>`, `<Animations>`, and button,
+  slider, status bar and edit box specifics.
+- Virtual templates, intrinsics, `mixin`/`secureMixin`, `parentKey`/`parentArray`, `$parent` names and `<Font>`
+  objects.
+- `OnLoad` runs children first, like the client. XML templates also work with `CreateFrame`.
+- `Bindings.xml` is loaded.
+
+**Animations**: `AnimationGroup` with Alpha, Translation, Scale, Rotation, VertexColor and FlipBook. Supports order,
+delays, smoothing, looping (`REPEAT`/`BOUNCE`), `SetToFinalAlpha`, and the OnPlay/OnFinished/OnLoop scripts.
+
+**Security**
+
+- Addon calls to protected functions (`CastSpellByName`, `TargetUnit` and so on) are forbidden, and
+  `ADDON_ACTION_FORBIDDEN` fires.
+- Protected frames (secure templates) can't be shown, moved or re-attributed by addon code in combat, and
+  `ADDON_ACTION_BLOCKED` fires. The report says which addon did it.
+- `SecureActionButtonTemplate` performs its spell, item, macro, target, click or attribute actions on real clicks and
+  key bindings, even in combat, but not from `button:Click()` in addon code.
+- Macro conditionals (`SecureCmdOptionParse`), `RegisterStateDriver`/`RegisterAttributeDriver`/`RegisterUnitWatch`,
+  and SecureHandler snippets (`_onstate-*`, `_onclick`, `_onshow`, `SetFrameRef`, `WrapScript`) run in a restricted
+  environment.
+- **Secret values** (opt-in, `secretValues = true`): in combat, API returns flagged secret by the documentation
+  become opaque values. Widgets can display them, but arithmetic, comparison and concatenation error.
+
+**SavedVariables**: account and per-character, written like the client's WTF files. They survive `/reload` and can
+be read and written on disk.
+
+## Limits
+
+- **Game data**: there's no server. Units, items, spells, auras and bags are what your test sets up. Functions that
+  aren't emulated return empty defaults (or mock them).
+- **Art**: file textures and models aren't drawn, only their placement and tint. Text metrics are an approximation of
+  the game font.
+- **Unconfirmed Forever details**: WoW: Forever's `WOW_PROJECT_ID` isn't published, so it defaults to
+  `WOW_PROJECT_MAINLINE` (override with `projectId`). Whether Forever enables 12.x secret-value restrictions is also
+  unknown, so they're opt-in.
+- **Blizzard UI**: Blizzard's own UI (action bars, unit frames and so on) exists as placeholders, not as working
+  Blizzard code.
+
+## Tested against real addons
+
+- The **Ace3** library suite loads with no errors.
+- **BugSack** (which ships a `[AllowLoadGameType camelot]` Forever file) loads apart from libraries its git repo
+  doesn't contain.
+- **OmniCC** initialises and loads its on-demand config addon.
+- **Details!**, around 1,700 frames, loads and reports only genuine Forever incompatibilities in its own code.
+
+Addons installed from git usually lack their embedded libraries. `check` points this out, so test the packaged
+release.
 
 ## Layout
 
 ```
-wowtest              CLI (test / check / run / new)
+wowtest               CLI: test / check / run / new
 wowapi/
-  init.lua           module entry: WoW.new(opts)
-  sim.lua            the simulated client: addons, events, time, input, SavedVariables, reports
-  api.lua            global game API (units, C_* namespaces, chat, timers, colors, settings, ...)
-  widgets.lua        CreateFrame and the widget hierarchy
-  toc.lua            .toc / XML parsing
-  serialize.lua      SavedVariables (WTF) writer
-  testing.lua        describe/it/expect runner
-  compat.lua         Lua 5.1 / LuaJIT / 5.2+ shims, pure-Lua `bit`
-addons/HelloForever  example addon + tests
-spec/                tests for the emulator itself
+  init.lua            WoW.new(opts)
+  sim.lua             the simulated client: addons, events, time, input, SavedVariables, reports
+  api.lua             hand-written game API (units, chat, timers, colors, settings, ...)
+  docs.lua            documented API: auto functions, arg checks, mocks, widget method sets
+  resources.lua       GlobalStrings, constants, CVars, stubs, templates, fonts, named frames
+  widgets.lua         CreateFrame and the widget hierarchy
+  layout.lua          anchor/size resolution, hit-testing
+  render.lua          SVG screenshots
+  xml.lua             FrameXML parser/loader, Bindings.xml
+  templates.lua       built-in Blizzard templates
+  animation.lua       AnimationGroups
+  secure.lua          combat lockdown, protected calls, secure buttons, state drivers, snippets
+  secrets.lua         12.x secret values
+  input.lua           keyboard and key bindings
+  framexml.lua        pools, callback registry, menus, mixins, combat log, ...
+  toc.lua             .toc parsing, game-type conditions
+  serialize.lua       SavedVariables writer
+  testing.lua         describe/it/expect runner
+  data/               generated API data (see tools/)
+tools/
+  update-apidocs.sh   regenerate data/apidocs.lua from Blizzard's API docs
+  update-resources.sh regenerate data/resources.lua + GlobalStrings (add locales: deDE frFR ...)
+addons/HelloForever   example addon + tests
+spec/                 tests for the simulator itself
 ```
 
-CI (`.github/workflows/test.yml`) runs every spec and smoke-tests every addon under Lua 5.1 and LuaJIT on each push.
+When a new client build ships, run `tools/update-apidocs.sh` and `tools/update-resources.sh` to pick up the new API.
+
+CI (`.github/workflows/test.yml`) runs every spec under Lua 5.1 and LuaJIT, smoke-tests each addon in `addons/`,
+and uploads their screenshots.
