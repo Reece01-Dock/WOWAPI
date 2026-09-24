@@ -17,8 +17,14 @@ wowtest - WoW: Forever addon test harness (Interface ]] .. WoW.INTERFACE .. [[)
 
 Usage:
   wowtest test [paths...] [-v] [-f pattern]   Run spec files (default: addons spec)
-  wowtest check <addon dir...> [--legacy] [--screenshot ui.svg]
+  wowtest check <addon dir...> [--legacy] [--screenshot ui.svg|ui.png] [--outlines]
                                               Smoke-test addons: load, login, report
+
+Art & data options (check / run):
+  --no-art         screenshots without game textures (no downloads)
+  --offline        only use art already cached or in --art-dir
+  --art-dir <dir>  a folder of extracted UI textures (PNG) to use first
+  --no-fake        API returns empty values instead of generated game data
   wowtest run <addon dir...> [--name N] [--class C] [--level L]
                                               Interactive console
   wowtest new <AddonName>                     Create addons/<AddonName> from a template
@@ -33,6 +39,8 @@ local function parseFlags(args)
     if a == "-v" or a == "--verbose" then flags.verbose = true
     elseif a == "--legacy" then flags.legacy = true
     elseif a == "-f" or a == "--filter" then flags.filter = args[i + 1]; i = i + 1
+    elseif a == "--art" or a == "--no-art" or a == "--outlines" or a == "--offline" or a == "--no-fake" then
+      flags[a:sub(3)] = true
     elseif a:match("^%-%-") then flags[a:sub(3)] = args[i + 1]; i = i + 1
     else pos[#pos + 1] = a end
     i = i + 1
@@ -68,7 +76,8 @@ local function simFor(dirs, flags)
   local paths = {}
   for _, d in ipairs(dirs) do paths[#paths + 1] = toc.dirname(d) end
   return WoW.new({ player = player, addonPaths = paths, legacyGlobals = flags.legacy,
-    savedVariablesDir = flags.wtf, quiet = true })
+    savedVariablesDir = flags.wtf, quiet = true, art = not flags["no-art"], offline = flags.offline,
+    artDir = flags["art-dir"], fakeData = not flags["no-fake"], artVerbose = true })
 end
 
 local commands = {}
@@ -104,7 +113,7 @@ function commands.check(args)
     end
   end
   if flags.screenshot then
-    sim:Screenshot(flags.screenshot, { outlines = flags.outlines ~= nil })
+    sim:Screenshot(flags.screenshot, { outlines = flags.outlines })
     print("Screenshot written to " .. flags.screenshot)
   end
   sim:Logout()
@@ -192,9 +201,9 @@ Logged in as ]] .. sim.player.name .. [[ (]] .. sim.player.class .. [[ ]] .. sim
     elseif cmd == "target" then
       sim:SetTarget(rest ~= "" and { name = rest, hostile = true } or nil)
     elseif cmd == "screenshot" then
-      local path = rest ~= "" and rest or "screenshot.svg"
-      sim:Screenshot(path, { outlines = true })
-      print("Wrote " .. path .. " (open it in a browser)")
+      local path = rest ~= "" and rest or "screenshot.png"
+      local ok, err = pcall(sim.Screenshot, sim, path)
+      print(ok and ("Wrote " .. path) or tostring(err))
     elseif cmd == "mouse" then
       local x, y = rest:match("(%-?[%d.]+)%s+(%-?[%d.]+)")
       local f = sim:MoveMouse(tonumber(x) or 0, tonumber(y) or 0)

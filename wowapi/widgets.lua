@@ -598,7 +598,18 @@ function M.install(sim, env)
   function T:GetTexture() return S(self).texture end
   function T:GetTextureFileID() return type(S(self).texture) == "number" and S(self).texture or nil end
   function T:SetColorTexture(r, g, b, a) S(self).texture = "color"; S(self).color = { r, g, b, a or 1 } end
-  function T:SetAtlas(a) S(self).atlas = a; return true end
+  function T:SetAtlas(a, useAtlasSize)
+    local s = S(self)
+    local info = require("wowapi.assets").atlasInfo(a)
+    s.atlas = a
+    s.texture = nil
+    if info then
+      s.texCoord = nil
+      if useAtlasSize then s.width, s.height = info.width, info.height end
+      return true
+    end
+    return false
+  end
   function T:GetAtlas() return S(self).atlas end
   function T:SetTexCoord(...) S(self).texCoord = { ... } end
   function T:GetTexCoord() return unpack(S(self).texCoord or { 0, 0, 0, 1, 1, 0, 1, 1 }) end

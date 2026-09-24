@@ -257,7 +257,7 @@ end)
 
 describe("documented API", function()
   it("defines every documented function with typed defaults", function()
-    local sim = newSim()
+    local sim = newSim({ fakeData = false })
     local _, info, n, name = sim:Exec([[
       return C_PvP.GetZonePVPInfo and "has" or "missing", C_CurrencyInfo.GetCurrencyListSize(), C_BattleNet.GetAccountInfoByID and "has"
     ]])
@@ -267,7 +267,7 @@ describe("documented API", function()
   end)
 
   it("fills in documented structures", function()
-    local sim = newSim()
+    local sim = newSim({ fakeData = false })
     local _, info = sim:Exec("return C_Map.GetMapInfo(1)")
     expect(info.mapID).to_be(1)
     local _, q = sim:Exec("return C_QuestLog.GetInfo(1)")

@@ -15,10 +15,10 @@ Sim.__index = Sim
 
 local DEFAULT_PLAYER = {
   name = "Tester", realm = "Forever", class = "WARRIOR", race = "Human", faction = "Alliance",
-  sex = 2, level = 60, health = 5000, healthMax = 5000, power = 100, powerMax = 100,
-  powerType = 1, money = 1234567, guild = nil, zone = "Elwynn Forest", subZone = "Goldshire",
-  guid = "Player-1-00000001", mapID = 1429,
+  sex = 2, level = 60, health = 5000, healthMax = 5000, money = 1234567, guild = nil,
+  zone = "Elwynn Forest", subZone = "Goldshire", guid = "Player-1-00000001", mapID = 1429,
 }
+local faker = require("wowapi.faker")
 
 local DEFAULT_BUILD = { version = "1.60.1", build = "60101", date = "Sep 1 2026", interface = 16001 }
 
@@ -74,9 +74,24 @@ function Sim:_reset()
   self.addonOrder = {}
   self.eventCallbacks = {}
   self.units = {}
+  self.fakeData = opts.fakeData ~= false
+  local op = opts.player or {}
   local p = {}
   for k, v in pairs(DEFAULT_PLAYER) do p[k] = v end
-  for k, v in pairs(opts.player or {}) do p[k] = v end
+  -- class-derived data (power type, specs, role) always matches the class
+  local class = op.class or p.class
+  local char = faker.character(op.name or p.name, { class = class, faction = op.faction or p.faction,
+    race = op.race or p.race, level = op.level or p.level, spec = op.spec, healthMax = op.healthMax or p.healthMax })
+  for _, k in ipairs({ "powerType", "power", "powerMax", "specs", "numSpecs", "spec", "specID", "role" }) do p[k] = char[k] end
+  if self.fakeData then
+    p.guild = faker.guildName(op.name or p.name)
+    local zones = faker.ZONES[op.faction or p.faction] or faker.ZONES.Alliance
+    if op.faction and op.faction ~= "Alliance" and not op.zone then
+      local z = zones[1]
+      p.zone, p.mapID, p.subZone = z[1], z[2], z[3]
+    end
+  end
+  for k, v in pairs(op) do p[k] = v end
   self.units.player = p
   self.player = p
   self.items = {}
@@ -84,6 +99,9 @@ function Sim:_reset()
   for id, v in pairs(opts.items or {}) do self:AddItem(id, v) end
   for id, v in pairs(opts.spells or {}) do self:AddSpell(id, v) end
   self.cvars = {}
+  self.spellCooldowns = {}
+  self.auraSeq = 0
+  self.castSeq = 0
   self.popups = {}
   self.chatFilters = {}
   self.bags = {}
@@ -119,10 +137,13 @@ function Sim:_reset()
   docs.install(self, env)
   require("wowapi.input").install(self, env)
   require("wowapi.framexml").install(self, env)
+  if self.fakeData then require("wowapi.fakeapi").install(self, env) end
   require("wowapi.secure").install(self, env)
   require("wowapi.xml").install(self)
   require("wowapi.resources").install(self, env)
   require("wowapi.secrets").install(self, env)
+  if self.fakeData and not opts.bags then self:_fakeBags() end
+  for bag, contents in pairs(opts.bags or {}) do self.bags[bag] = contents end
 end
 
 -------------------------------------------------------------------- utils
@@ -715,14 +736,84 @@ end
 
 -------------------------------------------------------------------- screenshot
 
--- Render what's on screen to SVG. With a path, writes the file.
+-- The shared game-art store (downloads and caches textures on demand).
+local artStores = {}
+function Sim:ArtStore()
+  local o = self.opts
+  local key = table.concat({ tostring(o.artDir), tostring(o.artCache), tostring(o.offline) }, "|")
+  if not artStores[key] then
+    artStores[key] = require("wowapi.assets").store({ artDir = o.artDir, cacheDir = o.artCache,
+      offline = o.offline, verbose = o.artVerbose })
+  end
+  return artStores[key]
+end
+
+-- A headless browser for PNG export. chrome-headless-shell renders exactly
+-- 1920x1080; regular Chrome/Chromium works too (see _viewportExtra).
+local function findBrowser()
+  local function ok(cmd) local r = os.execute(cmd .. " >/dev/null 2>&1"); return r == 0 or r == true end
+  local list = {}
+  if os.getenv("WOWAPI_BROWSER") then list[#list + 1] = os.getenv("WOWAPI_BROWSER") end
+  for _, b in ipairs({ "chrome-headless-shell", "headless_shell" }) do list[#list + 1] = b end
+  -- Playwright / Puppeteer installs of the headless shell
+  local p = io.popen("ls -d /opt/pw-browsers/chromium_headless_shell-*/*/headless_shell "
+    .. "$HOME/.cache/ms-playwright/chromium_headless_shell-*/*/headless_shell "
+    .. "$HOME/.cache/puppeteer/chrome-headless-shell/*/*/chrome-headless-shell 2>/dev/null")
+  if p then for line in p:lines() do list[#list + 1] = line end; p:close() end
+  for _, b in ipairs({ "chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "msedge",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" }) do list[#list + 1] = b end
+  p = io.popen("ls -d /opt/pw-browsers/chromium-*/chrome-linux/chrome $HOME/.cache/ms-playwright/chromium-*/chrome-linux/chrome 2>/dev/null")
+  if p then for line in p:lines() do list[#list + 1] = line end; p:close() end
+  for _, b in ipairs(list) do
+    if ok("command -v '" .. b .. "'") then return b, b:find("headless") ~= nil end
+  end
+end
+
+-- Render what's on screen. Returns the SVG markup; with a path, writes an
+-- .svg file, or a .png (rendered with a headless Chrome/Chromium if found).
 --   sim:Screenshot("ui.svg", { outlines = true })
+--   sim:Screenshot("ui.png", { art = true })   -- real game textures
+-- opts: art (default: WoW.new's `art` option), outlines, background
+-- (a texture path), embed (default true), cursor, font.
 function Sim:Screenshot(path, opts)
+  opts = opts or {}
+  if opts.art == nil then opts.art = self.opts.art end
+  local png = path and path:lower():match("%.png$")
+  if png then opts.embed = opts.embed ~= false end
   local svg = render.svg(self, opts)
   if path then
-    local f = assert(io.open(path, "w"))
+    local target = png and (os.tmpname() .. ".svg") or path
+    local f = assert(io.open(target, "w"))
     f:write(svg)
     f:close()
+    if png then
+      local browser, isShell = findBrowser()
+      if not browser then
+        os.rename(target, path:gsub("%.[Pp][Nn][Gg]$", ".svg"))
+        error("Screenshot: no Chrome/Chromium found to make a PNG (set WOWAPI_BROWSER); wrote an .svg instead", 2)
+      end
+      local abs = target:sub(1, 1) == "/" and target or (io.popen("pwd"):read("*l") .. "/" .. target)
+      local out = path:sub(1, 1) == "/" and path or (io.popen("pwd"):read("*l") .. "/" .. path)
+      local flags = (isShell and "" or "--headless ") .. "--disable-gpu --no-sandbox --hide-scrollbars --force-device-scale-factor=1 --default-background-color=1a2418ff"
+      -- headless Chrome counts browser chrome inside --window-size; measure the
+      -- real viewport once and compensate so the PNG is exactly 1920x1080
+      if isShell then Sim._viewportExtra = 0 end
+      if not Sim._viewportExtra then
+        local calib = os.tmpname() .. ".html"
+        local cf = io.open(calib, "w")
+        cf:write("<html><body><script>document.body.textContent='VH='+innerHeight</script></body></html>")
+        cf:close()
+        local p = io.popen(string.format("'%s' %s --window-size=1920,1080 --dump-dom 'file://%s' 2>/dev/null", browser, flags, calib))
+        local dom = p and p:read("*a") or ""
+        if p then p:close() end
+        os.remove(calib)
+        local vh = tonumber(dom:match("VH=(%d+)"))
+        Sim._viewportExtra = vh and (1080 - vh) or 0
+      end
+      os.execute(string.format("'%s' %s --window-size=%d,%d --screenshot='%s' 'file://%s' >/dev/null 2>&1",
+        browser, flags, 1920, 1080 + Sim._viewportExtra, out, abs))
+      os.remove(target)
+    end
   end
   return svg
 end
@@ -864,6 +955,150 @@ function Sim:AddSpell(id, info)
   self.spells[info.name] = info
 end
 
+-------------------------------------------------------------------- fake world
+
+function Sim:_fakeBags()
+  self.bags = self.bags or {}
+  local r = faker.rng("bags:" .. tostring(self.opts.player and self.opts.player.name or "Tester"))
+  local backpack = { size = 16, { itemID = 6948, stackCount = 1 }, { itemID = 4540, stackCount = 8 }, { itemID = 159, stackCount = 12 } }
+  for slot = 4, 7 do backpack[slot] = { itemID = r.int(20000, 180000), stackCount = 1 } end
+  self.bags[0] = backpack
+  for bag = 1, 4 do
+    local b = { size = 14 }
+    for slot = 1, r.int(2, 6) do b[slot] = { itemID = r.int(20000, 180000), stackCount = r.chance(0.3) and r.int(2, 20) or 1 } end
+    self.bags[bag] = b
+  end
+end
+
+-- Fill the party (party1..partyN, max 4) with generated players.
+function Sim:SpawnParty(n, opts)
+  opts = opts or {}
+  for i = 1, 4 do self.units["party" .. i] = nil end
+  for i = 1, 40 do self.units["raid" .. i] = nil end
+  local out = {}
+  for i = 1, math.min(n or 4, 4) do
+    local o = {}
+    for k, v in pairs(opts) do o[k] = v end
+    o.faction = o.faction or self.player.faction
+    o.level = o.level or self.player.level
+    o.class = (opts.classes or {})[i]
+    local u = faker.character("party" .. i .. ":" .. tostring(opts.seed or ""), o)
+    self.units["party" .. i] = u
+    out[i] = u
+  end
+  self:FireEvent("GROUP_ROSTER_UPDATE")
+  return out
+end
+
+-- Fill a raid (raid1 = you, raid2..raidN generated; party1-4 = your group).
+function Sim:SpawnRaid(n, opts)
+  opts = opts or {}
+  for i = 1, 4 do self.units["party" .. i] = nil end
+  for i = 1, 40 do self.units["raid" .. i] = nil end
+  n = math.min(n or 20, 40)
+  self.units.raid1 = self.player
+  self.player.subgroup = 1
+  for i = 2, n do
+    local u = faker.character("raid" .. i .. ":" .. tostring(opts.seed or ""), { faction = self.player.faction, level = self.player.level })
+    u.subgroup = math.floor((i - 1) / 5) + 1
+    self.units["raid" .. i] = u
+    if i <= 5 then self.units["party" .. (i - 1)] = u end
+  end
+  self.player.leader = true
+  self:FireEvent("GROUP_ROSTER_UPDATE")
+end
+
+-- Spawn an enemy NPC and target it. opts: name, level, boss, classification, healthMax...
+function Sim:SpawnEnemy(opts)
+  opts = opts or {}
+  self.npcSeq = (self.npcSeq or 0) + 1
+  local npc = faker.npc(opts.seed or self.npcSeq, opts)
+  self.units.target = npc
+  if npc.classification == "worldboss" or opts.boss then
+    self.units.boss1 = npc
+    self:FireEvent("INSTANCE_ENCOUNTER_ENGAGE_UNIT")
+  end
+  self:FireEvent("PLAYER_TARGET_CHANGED")
+  return npc
+end
+
+local function spellData(self, spell)
+  if type(spell) == "table" then return spell end
+  local s = self.spells[spell]
+  if not s and type(spell) == "string" then
+    for _, k in ipairs(faker.KNOWN_SPELLS) do if k[2]:lower() == spell:lower() then spell = k[1]; break end end
+  end
+  s = s or self.spells[spell]
+  if not s and type(spell) == "number" then s = faker.spell(spell); self.spells[spell] = s end
+  return s
+end
+
+-- Put an aura on a unit: sim:AddAura("player", 774, { duration = 12 })
+function Sim:AddAura(unit, spell, opts)
+  opts = opts or {}
+  local u = self.units[unit]
+  if not u then error("AddAura: no unit '" .. tostring(unit) .. "'", 2) end
+  local s = spellData(self, spell)
+  opts.now = self.time
+  local a = faker.aura(s, opts)
+  self.auraSeq = self.auraSeq + 1
+  a.auraInstanceID = self.auraSeq
+  u.auras = u.auras or {}
+  table.insert(u.auras, a)
+  self:FireEvent("UNIT_AURA", unit, { addedAuras = { a }, isFullUpdate = false })
+  return a
+end
+
+function Sim:RemoveAura(unit, spell)
+  local u = self.units[unit]
+  local s = spellData(self, spell)
+  for i = #(u.auras or {}), 1, -1 do
+    local a = u.auras[i]
+    if a.spellId == s.id then
+      table.remove(u.auras, i)
+      self:FireEvent("UNIT_AURA", unit, { removedAuraInstanceIDs = { a.auraInstanceID }, isFullUpdate = false })
+    end
+  end
+end
+
+-- Change a unit's health and fire UNIT_HEALTH.
+function Sim:SetHealth(unit, value)
+  local u = self.units[unit]
+  u.health = math.max(0, math.min(u.healthMax or value, value))
+  u.dead = u.health == 0
+  self:FireEvent("UNIT_HEALTH", unit)
+  if u.dead and unit ~= "player" then
+    self:CombatLog("UNIT_DIED", { dest = unit })
+  end
+end
+
+-- The player casts a spell: UNIT_SPELLCAST_* events over the cast time,
+-- a combat-log SPELL_CAST_SUCCESS and the spell's cooldown.
+function Sim:Cast(spell, opts)
+  opts = opts or {}
+  local s = spellData(self, spell)
+  local target = opts.target or (self.units.target and "target") or "player"
+  self.castSeq = self.castSeq + 1
+  local castGUID = string.format("Cast-3-1-2-3-%d-%08d", s.id, self.castSeq)
+  self:FireEvent("UNIT_SPELLCAST_SENT", "player", self.units[target] and self.units[target].name or "", castGUID, s.id)
+  local castTime = (s.castTime or 0) / 1000
+  if castTime > 0 then
+    self.player.casting = { spell = s, startTime = self.time, endTime = self.time + castTime, castGUID = castGUID }
+    self:FireEvent("UNIT_SPELLCAST_START", "player", castGUID, s.id)
+    self:CombatLog("SPELL_CAST_START", { source = "player", dest = target, spellId = s.id })
+    self:Advance(castTime)
+    self.player.casting = nil
+    self:FireEvent("UNIT_SPELLCAST_STOP", "player", castGUID, s.id)
+  end
+  self:FireEvent("UNIT_SPELLCAST_SUCCEEDED", "player", castGUID, s.id)
+  self:CombatLog("SPELL_CAST_SUCCESS", { source = "player", dest = target, spellId = s.id })
+  if (s.cooldownSeconds or 0) > 0 then
+    self.spellCooldowns[s.id] = { startTime = self.time, duration = s.cooldownSeconds, isEnabled = true, modRate = 1 }
+    self:FireEvent("SPELL_UPDATE_COOLDOWN")
+  end
+  return castGUID
+end
+
 -------------------------------------------------------------------- chat
 
 local function stripCodes(s)
@@ -989,5 +1224,6 @@ end
 
 for k, v in pairs(require("wowapi.input").SimMethods) do Sim[k] = v end
 for k, v in pairs(require("wowapi.framexml").SimMethods) do Sim[k] = v end
+for k, v in pairs(require("wowapi.fakeapi").SimMethods) do Sim[k] = v end
 
 return Sim

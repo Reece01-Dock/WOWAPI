@@ -124,7 +124,19 @@ function M.install(sim, env)
   local widgets = require("wowapi.widgets")
   sim.resources = r
 
-  -- constants
+  -- constants: FrameXML's own (INVSLOT_*, ...) then engine project IDs
+  for k, v in pairs(require("wowapi.data.constants")) do
+    if rawget(env, k) == nil then
+      if type(v) == "table" then
+        local copy = {}
+        for a, b in pairs(v) do
+          if type(b) == "table" then local c = {}; for x, y in pairs(b) do c[x] = y end; copy[a] = c else copy[a] = b end
+        end
+        v = copy
+      end
+      rawset(env, k, v)
+    end
+  end
   for k, v in pairs(PROJECTS) do rawset(env, k, v) end
   rawset(env, "WOW_PROJECT_ID", sim.opts.projectId or PROJECTS.WOW_PROJECT_MAINLINE)
   local enum = rawget(env, "Enum")

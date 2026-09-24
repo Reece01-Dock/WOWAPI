@@ -21,6 +21,8 @@ Use it to:
   API calls that aren't emulated, plus an optional screenshot.
 - **Play with it interactively** (`./wowtest run`): a terminal "client" where you type `/commands`, press keys,
   click, drag, fire events and take screenshots.
+- **See it**: screenshots are drawn with **the real game art**, downloaded on demand, in a **fake but believable
+  world** of generated items, spells, NPCs, party members, gear and bags.
 
 ## Target client
 
@@ -46,7 +48,7 @@ brew install lua@5.1         # macOS (or: brew install luajit)
 ./wowtest test                                 # run every *_spec.lua under addons/ and spec/
 ./wowtest new MyAddon                          # scaffold addons/MyAddon with a .toc, code and a test
 ./wowtest test addons/MyAddon                  # run one addon's tests
-./wowtest check path/to/AddOns/SomeAddon --screenshot ui.svg
+./wowtest check path/to/AddOns/SomeAddon --screenshot ui.png   # with real game textures
 ./wowtest run addons/HelloForever --name Thrall --class SHAMAN
 ```
 
@@ -139,6 +141,85 @@ an event handler (in game it would only show up in the error frame). If a test e
 
 Screen coordinates are UIParent's 1920×1080, with the origin at the bottom-left, as in the client.
 
+## Game art
+
+Screenshots use the real WoW textures: icons, borders, buttons, checkboxes, sliders, status bars, tooltips, atlases,
+the cursor and, where available, the game font. They're downloaded the first time they're needed into
+`.wowtest/cache/` (git-ignored). **No game files are stored in this repository.**
+
+```sh
+./wowtest check addons/HelloForever --screenshot ui.png     # PNG needs Chrome/Chromium (or WOWAPI_BROWSER)
+./wowtest check addons/HelloForever --screenshot ui.svg     # SVG opens in any browser
+```
+
+```lua
+local sim = WoW.new({ art = true })        -- or pass { art = true } to one screenshot
+sim:Screenshot("ui.png", { outlines = true, background = "Interface\\Glues\\LoadingScreens\\LoadScreen_KulTiras-Tiragarde_wide" })
+```
+
+Where the art comes from, in order:
+
+1. **Your own folder** (`--art-dir <dir>`, `artDir = ...` or `$WOWAPI_ART`): extracted UI textures as PNG, matched
+   case-insensitively. For example, a checkout of Gethe/wow-ui-textures or your own BLP export.
+2. **[Gethe/wow-ui-textures](https://github.com/Gethe/wow-ui-textures)**: the game's UI textures as PNG. It's indexed
+   with a metadata-only git clone, and files are fetched one at a time.
+3. **[wago.tools](https://wago.tools)**: the game's own `.blp` file by fileDataID, for anything else, including the
+   newest atlases. `wowapi/blp.lua` (a pure-Lua BLP2 decoder: DXT1/3/5, palettized, BGRA) and `wowapi/png.lua`
+   convert it to PNG locally.
+4. **Wowhead's icon CDN**: a last fallback for icons.
+
+Textures given by fileDataID are resolved with the shipped icon index (`wowapi/data/icons.txt`, 33,819 icons) and,
+for other textures, the [community listfile](https://github.com/wowdev/wow-listfile), downloaded once. Atlases
+(`SetAtlas`, `C_Texture.GetAtlasInfo`, `useAtlasSize`) use the shipped `wowapi/data/atlases.txt` (17,471 atlases).
+
+The renderer handles:
+
+- texture coordinates, including flipped and 8-value coordinates
+- `SetVertexColor` tint, desaturation, `ADD` blending and rotation
+- horizontal and vertical tiling
+- classic 9-slice backdrops (`BackdropTemplate`)
+- button states, including highlight on hover
+- status-bar fill with the bar texture
+
+Other switches:
+
+- `--offline` / `offline = true`: only cached or local art is used.
+- `--no-art`: placeholders, with no downloads. This is the default inside tests.
+
+## Fake game data
+
+There's no server, so the simulator makes up a consistent world. Anything the server would send is generated from a
+seed, so the same item ID is always the same item, on every machine and every run.
+
+- **Items**: any item ID becomes a complete item: a name like "Stormforged Saber of the Boar", quality, item
+  level, class, subclass and equip slot, stack size, sell price, a quality-colored link, and a matching real icon.
+  Real classics are built in, like Hearthstone (6948) and Thunderfury (19019).
+- **Spells**: real class spells are built in (Fireball 133, Frostbolt 116, Flash Heal 2061, Charge 100 and more).
+  Any other ID becomes a named spell with a school-appropriate real icon, cast time, range and cooldown.
+- **Your character**:
+  - Real class data: power type, specs with real spec IDs and roles, and `IsPlayerSpell` for your class.
+  - A guild, a zone and bags (a Hearthstone, food, drink and loot).
+  - Equipped gear, with `GetInventoryItemLink` and `GetAverageItemLevel`.
+  - Stats, crit, haste, mastery and armor.
+  - Action bars filled with your class's spells.
+- **Documented functions nobody hand-wrote** return plausible values picked from each field's name and type (names,
+  IDs, icons, counts, percentages, timestamps, valid enum values, filled-in structures and lists) instead of empty
+  ones.
+
+World helpers:
+
+| | |
+|---|---|
+| `sim:SpawnParty(4)` / `sim:SpawnRaid(20)` | Generated group members with classes, roles and names (`GetRaidRosterInfo` works) |
+| `sim:SpawnEnemy({ boss = true })` | A hostile NPC as your target (and `boss1`) |
+| `sim:AddAura("player", 774, { duration = 12 })` / `RemoveAura` | Auras with `UNIT_AURA` update info |
+| `sim:Cast(133)` / `sim:Cast("Blink")` | `UNIT_SPELLCAST_*` events over the cast time, the combat log, cooldowns, `UnitCastingInfo` |
+| `sim:SetHealth("target", 0)` | `UNIT_HEALTH` (and `UNIT_DIED` in the combat log) |
+| `sim:SetAction(1, "spell", 133)` · `sim:AddMacro(name, body)` · `sim:Equipment()` | Action bars, macros, gear |
+
+`sim:AddItem`, `sim:AddSpell`, `player = {...}` and `sim:Mock(...)` always win over generated data.
+`fakeData = false` (or `--no-fake`) goes back to empty "no server" values.
+
 ## What's simulated
 
 **The API**
@@ -198,17 +279,15 @@ delays, smoothing, looping (`REPEAT`/`BOUNCE`), `SetToFinalAlpha`, and the OnPla
 **SavedVariables**: account and per-character, written like the client's WTF files. They survive `/reload` and can
 be read and written on disk.
 
-## Limits
+## Notes
 
-- **Game data**: there's no server. Units, items, spells, auras and bags are what your test sets up. Functions that
-  aren't emulated return empty defaults (or mock them).
-- **Art**: file textures and models aren't drawn, only their placement and tint. Text metrics are an approximation of
-  the game font.
-- **Unconfirmed Forever details**: WoW: Forever's `WOW_PROJECT_ID` isn't published, so it defaults to
-  `WOW_PROJECT_MAINLINE` (override with `projectId`). Whether Forever enables 12.x secret-value restrictions is also
-  unknown, so they're opt-in.
-- **Blizzard UI**: Blizzard's own UI (action bars, unit frames and so on) exists as placeholders, not as working
-  Blizzard code.
+- **Forever details that aren't published**: WoW: Forever's `WOW_PROJECT_ID` defaults to `WOW_PROJECT_MAINLINE`
+  (override with `projectId`), and 12.x secret-value restrictions are opt-in (`secretValues = true`).
+- **Game data is invented**, apart from the real facts built in: classes, specs, races, zones, and a set of real
+  spells and items. For exact values, register real data with `sim:AddItem`, `sim:AddSpell` or `sim:Mock`.
+- **Blizzard's own UI** (action bars, unit frames and so on) exists as placeholder frames, not as working Blizzard
+  code.
+- **Art downloads** need `git` and `curl`, and use POSIX shell tools. On Windows, use WSL or Git Bash.
 
 ## Tested against real addons
 
@@ -233,7 +312,11 @@ wowapi/
   resources.lua       GlobalStrings, constants, CVars, stubs, templates, fonts, named frames
   widgets.lua         CreateFrame and the widget hierarchy
   layout.lua          anchor/size resolution, hit-testing
-  render.lua          SVG screenshots
+  render.lua          screenshots (SVG/PNG) with real game art
+  assets.lua          game-art resolution + on-demand download cache
+  blp.lua / png.lua   BLP2 texture decoder, PNG encoder
+  faker.lua           generated items, spells, characters, NPCs, API values
+  fakeapi.lua         gear, stats, action bars, instances... from the fake world
   xml.lua             FrameXML parser/loader, Bindings.xml
   templates.lua       built-in Blizzard templates
   animation.lua       AnimationGroups
@@ -248,11 +331,12 @@ wowapi/
 tools/
   update-apidocs.sh   regenerate data/apidocs.lua from Blizzard's API docs
   update-resources.sh regenerate data/resources.lua + GlobalStrings (add locales: deDE frFR ...)
+  update-art-data.sh  regenerate data/icons.txt + data/atlases.txt
 addons/HelloForever   example addon + tests
 spec/                 tests for the simulator itself
 ```
 
-When a new client build ships, run `tools/update-apidocs.sh` and `tools/update-resources.sh` to pick up the new API.
+When a new client build ships, run the three `tools/update-*.sh` scripts to pick up the new API and art indexes.
 
 CI (`.github/workflows/test.yml`) runs every spec under Lua 5.1 and LuaJIT, smoke-tests each addon in `addons/`,
 and uploads their screenshots.

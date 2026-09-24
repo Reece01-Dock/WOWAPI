@@ -170,6 +170,10 @@ function M.install(sim, env)
       local mock = sim.mocks[key]
       if mock then return mock(...) end
       if impl then return impl(...) end
+      if sim.fakeData then
+        local out, n = require("wowapi.faker").returns(key, doc, ...)
+        return unpack(out, 1, n)
+      end
       local out, n = defaults(rets)
       return unpack(out, 1, n)
     end

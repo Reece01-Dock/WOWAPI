@@ -337,8 +337,7 @@ local function buildRegion(ctx, node, parent, layer, sublevel, existing)
   if tag == "Texture" or tag == "MaskTexture" or tag == "Line" then
     if a.file then obj:SetTexture(tonumber(a.file) or a.file) end
     if a.atlas then
-      obj:SetAtlas(a.atlas)
-      if bool(a.useAtlasSize) then s.width, s.height = s.width ~= 0 and s.width or 32, s.height ~= 0 and s.height or 32 end
+      obj:SetAtlas(a.atlas, bool(a.useAtlasSize))
     end
     if a.alphaMode then obj:SetBlendMode(a.alphaMode) end
     local c = kid(node, "Color")

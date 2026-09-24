@@ -569,6 +569,28 @@ function M.install(sim, env)
     GetSubZoneText = function() return sim.player.subZone or "" end,
     GetMinimapZoneText = function() return sim.player.subZone or sim.player.zone end,
     GetSpecialization = function() return sim.player.spec end,
+    GetSpecializationInfoByID = function(id)
+      for cls, info in pairs(require("wowapi.faker").CLASSES) do
+        for _, sp in ipairs(info.specs) do
+          if sp[1] == id then return sp[1], sp[2], sp[2] .. " specialization.", 136243, sp[3], cls, cls end
+        end
+      end
+    end,
+    GetSpecializationRole = function(i) local s = (sim.player.specs or {})[i]; return s and s.role end,
+    GetRaidRosterInfo = function(i)
+      local u = sim.units["raid" .. i]
+      if not u then return nil end
+      local cls, file = classOf(u)
+      return u.name, (u.leader and 2 or 0), u.subgroup or 1, u.level, cls, file, u.zone or sim.player.zone,
+        true, u.dead or false, u.role == "TANK" and "MAINTANK" or nil, false, u.role or "NONE"
+    end,
+    UnitCastingInfo = function(unit)
+      local x = U(unit)
+      local c = x and x.casting
+      if not c then return nil end
+      return c.spell.name, c.spell.name, c.spell.icon, c.startTime * 1000, c.endTime * 1000, false, c.castGUID, false, c.spell.id
+    end,
+    UnitChannelInfo = function(unit) return nil end,
     GetNumSpecializations = function() return sim.player.numSpecs or 3 end,
     GetSpecializationInfo = function(i)
       local s = (sim.player.specs or {})[i]
@@ -627,13 +649,24 @@ function M.install(sim, env)
   })
 
   ------------------------------------------------------------ items & spells
+  -- Items/spells registered with sim:AddItem/AddSpell win; any other ID
+  -- is a generated (fake but consistent) item or spell when fakeData is on.
+  local faker = require("wowapi.faker")
+  local function fakeItem(id)
+    if not sim.fakeData or type(id) ~= "number" or id <= 0 then return nil end
+    local i = faker.item(id, sim.player.level)
+    sim.items[id] = i
+    return i
+  end
   local function itemRef(ref)
     if type(ref) == "string" then
       local id = ref:match("item:(%d+)")
-      if id then return sim.items[tonumber(id)] end
-      return sim.items[ref] or sim.items[tonumber(ref) or -1]
+      if id then id = tonumber(id); return sim.items[id] or fakeItem(id) end
+      if sim.items[ref] then return sim.items[ref] end
+      local n = tonumber(ref)
+      return n and (sim.items[n] or fakeItem(n)) or nil
     end
-    return sim.items[ref]
+    return sim.items[ref] or fakeItem(ref)
   end
   local function GetItemInfo(ref)
     local i = itemRef(ref)
@@ -654,14 +687,34 @@ function M.install(sim, env)
     GetItemCount = function(ref)
       local i = itemRef(ref); if not i then return 0 end
       local n = 0
-      for _, bag in pairs(sim.bags) do for _, slot in pairs(bag) do if slot.itemID == i.id then n = n + (slot.stackCount or 1) end end end
+      for _, bag in pairs(sim.bags) do
+        for k, slot in pairs(bag) do
+          if type(k) == "number" and type(slot) == "table" and slot.itemID == i.id then n = n + (slot.stackCount or 1) end
+        end
+      end
       return n
     end,
     DoesItemExistByID = function(id) return itemRef(id) ~= nil end,
     RequestLoadItemDataByID = function() end,
     IsItemDataCachedByID = function(id) return itemRef(id) ~= nil end,
   })
-  local function spellRef(ref) return sim.spells[ref] or sim.spells[tonumber(ref) or -1] end
+  local function spellRef(ref)
+    local s = sim.spells[ref] or sim.spells[tonumber(ref) or -1]
+    if s then return s end
+    if type(ref) == "string" and not tonumber(ref) then
+      for _, k in ipairs(faker.KNOWN_SPELLS) do
+        if k[2]:lower() == ref:lower() then ref = k[1]; break end
+      end
+      if type(ref) == "string" then return nil end
+    end
+    local id = tonumber(ref)
+    if sim.fakeData and id and id > 0 then
+      s = faker.spell(id)
+      sim.spells[id] = s
+      sim.spells[s.name] = sim.spells[s.name] or s
+      return s
+    end
+  end
   rawset(env, "C_Spell", {
     GetSpellInfo = function(ref)
       local s = spellRef(ref); if not s then return nil end
@@ -672,7 +725,7 @@ function M.install(sim, env)
     GetSpellTexture = function(ref) local s = spellRef(ref); if s then return s.icon or 136243, s.icon or 136243 end end,
     GetSpellCooldown = function(ref)
       local s = spellRef(ref); if not s then return nil end
-      local cd = s.cooldown or { startTime = 0, duration = 0 }
+      local cd = sim.spellCooldowns and sim.spellCooldowns[s.id] or s.cooldown or { startTime = 0, duration = 0 }
       return { startTime = cd.startTime or 0, duration = cd.duration or 0, isEnabled = true, modRate = 1 }
     end,
     DoesSpellExist = function(ref) return spellRef(ref) ~= nil end,
@@ -684,7 +737,15 @@ function M.install(sim, env)
     GetSpellDescription = function(ref) local s = spellRef(ref); return s and s.description or "" end,
     IsCurrentSpell = function() return false end,
   })
-  rawset(env, "IsPlayerSpell", function(id) local s = spellRef(id); return s ~= nil and s.known ~= false end)
+  rawset(env, "IsPlayerSpell", function(id)
+    local s = sim.spells[id]
+    if s then return s.known ~= false end
+    -- with fake data, the player knows their class's well-known spells
+    for _, k in ipairs(faker.KNOWN_SPELLS) do
+      if k[1] == id then return sim.fakeData and (k[4] == nil or k[4] == sim.player.class) or false end
+    end
+    return false
+  end)
   rawset(env, "IsSpellKnown", env.IsPlayerSpell)
 
   -- bags: sim.bags[bag][slot] = { itemID = n, stackCount = n }
@@ -713,6 +774,17 @@ function M.install(sim, env)
   })
   rawset(env, "NUM_BAG_SLOTS", 4)
   rawset(env, "BACKPACK_CONTAINER", 0)
+
+  ------------------------------------------------------------ textures
+  rawset(env, "C_Texture", {
+    GetAtlasInfo = function(atlas)
+      local a = require("wowapi.assets").atlasInfo(atlas)
+      if not a then return nil end
+      return { width = a.width, height = a.height, rawSize = { x = a.width, y = a.height },
+        leftTexCoord = a.left, rightTexCoord = a.right, topTexCoord = a.top, bottomTexCoord = a.bottom,
+        tilesHorizontally = a.tilesH, tilesVertically = a.tilesV, file = a.fileID, filename = a.path }
+    end,
+  })
 
   ------------------------------------------------------------ map
   rawset(env, "C_Map", {
