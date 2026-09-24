@@ -313,6 +313,43 @@ Results from a run of 13 popular addons (a scripted scenario for each, then a sc
 | Dominos | Its `.toc` has no 16001 interface and no `[Game]` = Camelot bar-state file, so on Forever you get the default bar. |
 | WeakAuras | Only ships Classic-flavor `.toc` files, so it isn't loaded (`INCOMPATIBLE`). |
 
+## Signed releases and the compatibility index
+
+**Signed releases** protect players from tampered downloads (fake mirrors, re-uploads with injected code). They are
+not DRM: the addon stays plain, readable Lua, as Blizzard's add-on policy requires, and anyone can still read and
+fork it. Signing uses Ed25519 through the `openssl` command-line tool.
+
+```sh
+./wowtest keygen                        # once: ~/.config/wowtest/keys/author.key (secret) + author.pub (publish it)
+./wowtest sign path/to/MyAddon          # writes wowtest.manifest + wowtest.sig; commit them with the release
+./wowtest verify path/to/MyAddon        # anyone: do the files match what the author signed?
+```
+
+- **What's signed:** `sign` signs every committed file (in a git checkout; otherwise every file) with its SHA-256. It
+  warns about uncommitted files, because a player's fresh clone won't have them.
+- **What fails verification:** a changed or missing file, an edited manifest, or an added `.lua`/`.xml`/`.toc` file.
+  Extra non-code files are reported but allowed.
+- **Checks on install:** `wowtest install` verifies the source before it fetches libraries or packages anything. It
+  refuses a bad signature.
+- **Remembered keys:** the first valid key for an addon name goes into `.wowtest/trusted-keys.txt`. After that,
+  installing that addon signed with a different key fails with `KEY CHANGED`. Delete its line to accept a new key.
+- **Pinning:** `--pubkey author.pub` pins an exact key, and `--require-signed` rejects unsigned addons.
+- **Not covered:** libraries fetched while packaging (`.pkgmeta` externals) come from their own sources, so the
+  author's signature doesn't cover them.
+
+The **compatibility index** runs every installed addon through the simulator: load, log in, and play for a few
+seconds. It then writes `.wowtest/index/index.json` and a searchable `index.html` with a badge per addon:
+
+```sh
+./wowtest install BigWigsMods/BigWigs tullamods/OmniCC ...
+./wowtest index                         # or: ./wowtest index path/to/AddOns --out site/
+```
+
+Each addon gets one of: *Runs cleanly*, *Runs with errors*, *Missing libraries*, *Incompatible* (with the reason,
+e.g. its `.toc` only allows another game type), or *Hangs*. Errors raised in other addons it loads are listed
+separately, and Forever-specific hints point out things like a `.toc` without interface 16001 or a removed event.
+Each addon is checked in its own process with a timeout (`--timeout 120`).
+
 ## Layout
 
 ```
@@ -337,6 +374,10 @@ wowapi/
   secrets.lua         12.x secret values
   input.lua           keyboard and key bindings
   framexml.lua        pools, callback registry, menus, mixins, combat log, ...
+  installer.lua       `wowtest install`: GitHub fetch + CurseForge-style packaging
+  signing.lua         signed releases: manifests, Ed25519 signatures, trusted keys
+  index.lua           compatibility index (JSON + HTML)
+  settingspanel.lua   the Settings window (Settings.OpenToCategory)
   toc.lua             .toc parsing, game-type conditions
   serialize.lua       SavedVariables writer
   testing.lua         describe/it/expect runner

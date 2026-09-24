@@ -188,7 +188,9 @@ function M.new(opts)
     addonsDir = opts.addonsDir or ((opts.root or ".wowtest") .. "/AddOns"),
     libPaths = opts.libPaths or {},
     log = opts.log or print,
-    report = { resolved = {}, missing = {} },
+    report = { resolved = {}, missing = {}, signatures = {} },
+    requireSigned = opts.requireSigned,
+    pubkey = opts.pubkey,
   }
   self.srcDir = self.root .. "/src"
   sh("mkdir -p " .. q(self.srcDir) .. " " .. q(self.addonsDir))
@@ -301,6 +303,10 @@ function M:install(src)
     if not gitClone(url, work) then error("could not clone " .. url, 0) end
   end
 
+  -- the author's signature covers the source as published, so check it
+  -- before anything (libraries, packaging) changes the tree
+  local sig = self:checkSignature(work, repoName, src)
+
   local meta = {}
   local f = io.open(work .. "/.pkgmeta", "r") or io.open(work .. "/pkgmeta.yaml", "r")
   if f then meta = M.parsePkgmeta(f:read("*a")); f:close() end
@@ -372,7 +378,44 @@ function M:install(src)
     end
   end
   table.sort(installed)
+  self:recordSignature(installed, sig, src)
   return installed
+end
+
+-- Verify a source tree's signature (see wowapi.signing). Errors when the
+-- signature is invalid, or when opts.requireSigned and there is none.
+function M:checkSignature(work, name, src)
+  local signing = require("wowapi.signing")
+  local present = exists(work .. "/" .. signing.MANIFEST) or exists(work .. "/" .. signing.SIGNATURE)
+  if not present then
+    if self.requireSigned then error(src .. " is not signed (--require-signed)", 0) end
+    local res = { status = "unsigned" }
+    table.insert(self.report.signatures, { addon = name, source = src, result = res })
+    return res
+  end
+  local res = signing.verifyTrusted(work, name, signing.keyringPath(self.root), { pubkey = self.pubkey })
+  table.insert(self.report.signatures, { addon = name, source = src, result = res })
+  if res.status ~= "valid" then
+    error("refusing to install " .. src .. ": " .. signing.describe(res), 0)
+  end
+  return res
+end
+
+-- Remember each installed addon's signature status (read by `wowtest index`).
+function M:recordSignature(addons, res, src)
+  local path = self.root .. "/signatures.lua"
+  local all = {}
+  local chunk = loadfile(path)
+  if chunk then
+    local ok, t = pcall(setfenv and setfenv(chunk, {}) or chunk)
+    if ok and type(t) == "table" then all = t end
+  end
+  for _, name in ipairs(addons) do
+    all[name] = { status = res.status, fingerprint = res.fingerprint, version = res.version, source = src,
+      trust = res.trust }
+  end
+  local f = io.open(path, "w")
+  if f then f:write("return " .. require("wowapi.serialize").serialize(all)); f:close() end
 end
 
 return M

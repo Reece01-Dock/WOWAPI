@@ -28,9 +28,17 @@ Art & data options (check / run):
   wowtest run <addon dir...> [--name N] [--class C] [--level L]
                                               Interactive console
   wowtest new <AddonName>                     Create addons/<AddonName> from a template
-  wowtest install <owner/repo>... [--into dir] [--libs dir]
+  wowtest install <owner/repo>... [--into dir] [--libs dir] [--require-signed] [--pubkey f.pub]
                                               Fetch addons from GitHub and package them (resolve
-                                              .pkgmeta libraries) into .wowtest/AddOns
+                                              .pkgmeta libraries) into .wowtest/AddOns; checks
+                                              author signatures and remembers their keys
+  wowtest index [AddOns dir] [--out dir]      Run every installed addon through the simulator
+                                              and write a compatibility index (JSON + HTML)
+
+Signed releases (tamper-proof downloads, not DRM):
+  wowtest keygen [name] [--out dir]           Create an Ed25519 key pair (~/.config/wowtest/keys)
+  wowtest sign <dir>... [--key file.key]      Write wowtest.manifest + wowtest.sig for a release
+  wowtest verify <dir>... [--pubkey f.pub]    Check files match what the author signed
 ]])
 end
 
@@ -42,7 +50,8 @@ local function parseFlags(args)
     if a == "-v" or a == "--verbose" then flags.verbose = true
     elseif a == "--legacy" then flags.legacy = true
     elseif a == "-f" or a == "--filter" then flags.filter = args[i + 1]; i = i + 1
-    elseif a == "--art" or a == "--no-art" or a == "--outlines" or a == "--offline" or a == "--no-fake" then
+    elseif a == "--art" or a == "--no-art" or a == "--outlines" or a == "--offline" or a == "--no-fake"
+      or a == "--require-signed" then
       flags[a:sub(3)] = true
     elseif a:match("^%-%-") then flags[a:sub(3)] = args[i + 1]; i = i + 1
     else pos[#pos + 1] = a end
@@ -246,7 +255,14 @@ function commands.install(args)
     print("Usage: wowtest install <owner/repo | git URL | folder>... [--into dir] [--libs dir]")
     return 2
   end
-  local inst = require("wowapi.installer").new({ addonsDir = flags.into, libPaths = { flags.libs } })
+  local pubkey
+  if flags.pubkey then
+    local f = io.open(flags.pubkey, "r")
+    if not f then print("No public key file at " .. flags.pubkey); return 2 end
+    pubkey = f:read("*a"); f:close()
+  end
+  local inst = require("wowapi.installer").new({ addonsDir = flags.into, libPaths = { flags.libs },
+    requireSigned = flags["require-signed"], pubkey = pubkey })
   local all = {}
   for _, src in ipairs(srcs) do
     local ok, res = pcall(inst.install, inst, src)
@@ -259,8 +275,132 @@ function commands.install(args)
   end
   for _, r in ipairs(inst.report.resolved) do print(string.format("  lib %-45s %s", r.addon .. ": " .. r.lib, r.how)) end
   for _, m in ipairs(inst.report.missing) do print(string.format("  MISSING %s: %s (%s)", m.addon, m.lib, tostring(m.url))) end
+  local signing = require("wowapi.signing")
+  for _, sg in ipairs(inst.report.signatures) do
+    print(string.format("  signature %-30s %s", sg.addon, signing.describe(sg.result)))
+    if sg.result.status == "valid" and #inst.report.resolved > 0 then
+      print("    (libraries fetched while packaging are not covered by the author's signature)")
+    end
+  end
   print("\nAddOns folder: " .. inst.addonsDir .. "\nTry: ./wowtest check " .. inst.addonsDir .. "/" .. (all[1] or "<Addon>"))
   return #inst.report.missing == 0 and 0 or 1
+end
+
+local LUA = arg[-1] or "lua"
+
+-- (internal) check one addon and write its record: wowtest _index1 <dir> <out>
+commands._index1 = function(args)
+  local rec = require("wowapi.index").check(args[1])
+  local f = assert(io.open(args[2], "w"))
+  f:write("return " .. require("wowapi.serialize").serialize(rec))
+  f:close()
+  return 0
+end
+
+function commands.index(args)
+  local pos, flags = parseFlags(args)
+  local root = pos[1] or ".wowtest/AddOns"
+  local out = flags.out or ".wowtest/index"
+  local timeoutSec = tonumber(flags.timeout) or 120
+  local idx = require("wowapi.index")
+  local dirs = {}
+  local p = io.popen('ls -1 "' .. root .. '" 2>/dev/null')
+  for n in p:lines() do
+    if toc.findToc(root .. "/" .. n) then dirs[#dirs + 1] = n end
+  end
+  p:close()
+  table.sort(dirs, function(a, b) return a:lower() < b:lower() end)
+  if #dirs == 0 then print("No addons in " .. root .. " (install some with: ./wowtest install owner/repo)"); return 2 end
+  local sigs = {}
+  local sf = loadfile(".wowtest/signatures.lua")
+  if sf then local ok, t = pcall(sf); if ok and type(t) == "table" then sigs = t end end
+  local hasTimeout = os.execute("command -v timeout >/dev/null 2>&1")
+  hasTimeout = hasTimeout == true or hasTimeout == 0
+  os.execute('mkdir -p "' .. out .. '"')
+  local addons = {}
+  for i, name in ipairs(dirs) do
+    io.write(string.format("[%d/%d] %-34s ", i, #dirs, name)); io.flush()
+    local tmp = os.tmpname()
+    local cmd = string.format('%s"%s" "%s" _index1 "%s" "%s" >/dev/null 2>&1',
+      hasTimeout and ("timeout " .. timeoutSec .. " ") or "", LUA, arg[0], root .. "/" .. name, tmp)
+    local r, _, c = os.execute(cmd)
+    local code = type(r) == "number" and math.floor(r / 256) or c
+    local chunk = loadfile(tmp)
+    local rec = chunk and select(2, pcall(chunk))
+    if type(rec) ~= "table" then
+      local timedOut = hasTimeout and code == 124
+      rec = { name = name, status = timedOut and "timeout" or "crash", errors = 0,
+        reason = timedOut and ("still running after " .. timeoutSec .. "s (an endless loop?)") or "the check itself failed" }
+    end
+    os.remove(tmp)
+    rec.signature = sigs[name] or { status = "unsigned" }
+    addons[#addons + 1] = rec
+    print(idx.STATUS[rec.status] .. (rec.errors > 0 and (" (" .. rec.errors .. " errors)") or ""))
+  end
+  local index = { interface = WoW.INTERFACE, generated = os.date("!%Y-%m-%d %H:%M UTC"), addons = addons }
+  local jf = assert(io.open(out .. "/index.json", "w")); jf:write(idx.json(index)); jf:close()
+  local hf = assert(io.open(out .. "/index.html", "w")); hf:write(idx.html(index)); hf:close()
+  print("\nWrote " .. out .. "/index.json and " .. out .. "/index.html")
+  return 0
+end
+
+local function keyDir() return (os.getenv("HOME") or ".") .. "/.config/wowtest/keys" end
+
+function commands.keygen(args)
+  local pos, flags = parseFlags(args)
+  local name = pos[1] or "author"
+  local signing = require("wowapi.signing")
+  local ok, key, pub, fp = pcall(signing.keygen, flags.out or keyDir(), name)
+  if not ok then print("keygen: " .. tostring(key)); return 1 end
+  print("Private key: " .. key .. "   (keep it secret and backed up; never commit it)")
+  print("Public key:  " .. pub .. "   (publish this, e.g. in your README or releases)")
+  print("Fingerprint: " .. fp)
+  print("\nSign an addon with: ./wowtest sign <addon dir> --key " .. key)
+  return 0
+end
+
+function commands.sign(args)
+  local dirs, flags = parseFlags(args)
+  local key = flags.key or (keyDir() .. "/author.key")
+  if #dirs == 0 then print("Usage: wowtest sign <addon or repo dir>... [--key file.key]"); return 2 end
+  local signing = require("wowapi.signing")
+  for _, d in ipairs(dirs) do
+    local untracked = signing.untracked(d)
+    if #untracked > 0 then
+      print("Warning: " .. d .. " has files that aren't committed; they are NOT signed (commit them first):")
+      for i = 1, math.min(#untracked, 10) do print("  " .. untracked[i]) end
+    end
+    local ok, res = pcall(signing.sign, d, key)
+    if not ok then print("sign: " .. tostring(res)); return 1 end
+    print(string.format("Signed %s: %d files, key %s", d, res.files, res.fingerprint))
+  end
+  print("Commit " .. signing.MANIFEST .. " and " .. signing.SIGNATURE .. " with the release.")
+  return 0
+end
+
+function commands.verify(args)
+  local dirs, flags = parseFlags(args)
+  if #dirs == 0 then print("Usage: wowtest verify <addon dir>... [--pubkey author.pub]"); return 2 end
+  local signing = require("wowapi.signing")
+  local pubkey
+  if flags.pubkey then
+    local f = io.open(flags.pubkey, "r")
+    if not f then print("No public key file at " .. flags.pubkey); return 2 end
+    pubkey = f:read("*a"); f:close()
+  end
+  local worst = 0
+  for _, d in ipairs(dirs) do
+    local ok, res = pcall(signing.verify, d, { pubkey = pubkey })
+    if not ok then print(d .. ": " .. tostring(res)); worst = 1
+    else
+      print(string.format("%s: %s", d, signing.describe(res)))
+      for _, f in ipairs(res.modified) do print("  modified: " .. f) end
+      for _, f in ipairs(res.missing) do print("  missing:  " .. f) end
+      for _, f in ipairs(res.extra) do print("  unsigned: " .. f) end
+      if res.status == "invalid" then worst = 1 elseif res.status == "unsigned" and worst == 0 then worst = 3 end
+    end
+  end
+  return worst
 end
 
 function commands.new(args)
