@@ -9,35 +9,11 @@
 -- here but are recorded in sim.stubbedCalls. Names that are not real API
 -- are nil, so a typo errors just like it would in game.
 local compat = require("wowapi.compat")
+local docs = require("wowapi.docs")
+local layout = require("wowapi.layout")
 local unpack = compat.unpack
 
 local M = {}
-
-local STUBS = {
-  Region = { "SetDrawLayer", "GetDrawLayer", "SetIgnoreParentAlpha", "SetIgnoreParentScale",
-    "SetScale", "SetClampedToScreen", "SetClampRectInsets", "SetHitRectInsets", "SetMouseClickEnabled",
-    "SetMouseMotionEnabled", "SetPassThroughButtons", "SetPropagateKeyboardInput", "EnableKeyboard",
-    "SetToplevel", "SetDontSavePosition", "SetUserPlaced", "SetResizable", "SetResizeBounds",
-    "StartSizing", "SetFixedFrameStrata", "SetFixedFrameLevel", "EnableDrawLayer", "DisableDrawLayer",
-    "SetFlattensRenderLayers", "SetClipsChildren", "Raise", "Lower", "SetSnapToPixelGrid",
-    "SetTexelSnappingBias", "CreateAnimationGroup", "StopAnimating", "SetRotation", "SetGradient",
-    "SetHighlightLocked", "SetMotionScriptsWhileDisabled", "SetAttribute", "SetHyperlinksEnabled",
-    "SetFrameRef", "SetEnabled", "SetFontObject", "SetShadowColor", "SetShadowOffset", "SetWordWrap",
-    "SetNonSpaceWrap", "SetMaxLines", "SetSpacing", "SetIndentedWordWrap", "SetTextHeight",
-    "SetTextInsets", "SetMultiLine", "SetAutoFocus", "SetMaxLetters", "SetMaxBytes", "SetCursorPosition",
-    "HighlightText", "SetHistoryLines", "AddHistoryLine", "SetCountInvisibleLetters", "SetBlinkSpeed",
-    "SetReverseFill", "SetFillStyle", "SetOrientation", "SetRotatesTexture", "SetDrawEdge",
-    "SetDrawSwipe", "SetDrawBling", "SetSwipeColor", "SetHideCountdownNumbers", "SetReverse",
-    "SetHorizontalScroll", "UpdateScrollChildRect", "SetThumbTexture", "SetObeyStepOnDrag",
-    "SetStepsPerPage", "SetNormalFontObject", "SetHighlightFontObject", "SetDisabledFontObject",
-    "SetPushedTextOffset", "SetButtonState", "LockHighlight", "UnlockHighlight", "SetMask",
-    "AddMaskTexture", "RemoveMaskTexture", "SetHorizTile", "SetVertTile", "SetSnapToPixelGrid",
-    "SetPadding", "SetMinResize", "SetMaxResize", "SetBackdropBorderColor", "SetBackdropColor",
-    "ApplyBackdrop", "SetStatusBarDesaturated", "SetTextToFit", "SetUnit", "SetSpellByID",
-    "SetItemByID", "SetHyperlink", "SetBagItem", "SetInventoryItem", "SetAction", "FadeOut",
-    "SetMinimumWidth", "SetPadding", "SetScrollChildRect", "SetSwipeTexture", "SetEdgeTexture",
-    "Clear", "SetCooldownDuration", "Pause", "Resume", "SetDesaturation", "SetEnabledState" },
-}
 
 local function isa(cls, target)
   while cls do
@@ -81,15 +57,24 @@ function M.install(sim, env)
     return sim:_runScript(obj, script, ...)
   end
 
+  ---------------------------------------------------------------- Object
+  local O = define("Object", nil)
+  function O:GetObjectType() return S(self).type end
+  function O:IsObjectType(t) return isa(classes[S(self).type], t) end
+  function O:IsForbidden() return false end
+  function O:GetName() return S(self).name end
+  function O:GetDebugName() return S(self).name or tostring(self) end
+  function O:GetParent() return S(self).parent end
+  function O:GetParentKey() return S(self).parentKey end
+  function O:SetParentKey(k)
+    local s = S(self)
+    s.parentKey = k
+    if s.parent then s.parent[k] = self end
+  end
+  function O:ClearParentKey() S(self).parentKey = nil end
+
   ---------------------------------------------------------------- Region
-  local R = define("Region", nil)
-  for _, n in ipairs(STUBS.Region) do R[n] = stub(n) end
-  function R:GetObjectType() return S(self).type end
-  function R:IsObjectType(t) return isa(classes[S(self).type], t) end
-  function R:IsForbidden() return false end
-  function R:GetName() return S(self).name end
-  function R:GetDebugName() return S(self).name or tostring(self) end
-  function R:GetParent() return S(self).parent end
+  local R = define("Region", "Object")
   function R:SetParent(p)
     local s = S(self)
     if s.parent and state[s.parent] then
@@ -117,42 +102,106 @@ function M.install(sim, env)
   function R:IsVisible() return visible(self) end
   function R:SetPoint(point, rel, relPoint, x, y)
     local s = S(self)
+    if type(point) ~= "string" or not layout.POINTS[point:upper()] then
+      error("Invalid region point " .. tostring(point), 2)
+    end
+    point = point:upper()
     if type(rel) == "number" then rel, relPoint, x, y = nil, nil, rel, relPoint end
-    if type(rel) == "string" then rel = env[rel] end
+    if type(rel) == "string" then
+      local name = rel
+      rel = sim:Get(name)
+      if not rel then error("SetPoint(): Couldn't find region named '" .. name .. "'", 2) end
+    end
+    if relPoint ~= nil and (type(relPoint) ~= "string" or not layout.POINTS[relPoint:upper()]) then
+      error("Invalid region point " .. tostring(relPoint), 2)
+    end
+    rel = rel or s.parent
+    if rel == self then error("Action[SetPoint] failed because[Cannot anchor to itself]", 2) end
+    if rel and layout.dependsOn(sim, rel, self) then
+      error("Action[SetPoint] failed because[Cannot anchor to a region dependent on it]", 2)
+    end
     for i, p in ipairs(s.points) do
       if p[1] == point then table.remove(s.points, i); break end
     end
-    table.insert(s.points, { point, rel or s.parent, relPoint or point, x or 0, y or 0 })
+    table.insert(s.points, { point, rel, relPoint and relPoint:upper() or point, x or 0, y or 0 })
   end
   function R:GetPoint(i)
     local p = S(self).points[i or 1]
-    if p then return unpack(p, 1, 5) end
+    if p then return p[1], p[2], p[3], p[4], p[5] end
+  end
+  function R:GetPointByName(name)
+    for _, p in ipairs(S(self).points) do
+      if p[1] == name then return p[1], p[2], p[3], p[4], p[5] end
+    end
   end
   function R:GetNumPoints() return #S(self).points end
   function R:ClearAllPoints() S(self).points = {} end
   function R:SetAllPoints(rel)
     local s = S(self)
+    if type(rel) == "string" then rel = rawget(env, rel) end
     rel = rel or s.parent
+    if rel == self then error("Action[SetAllPoints] failed because[Cannot anchor to itself]", 2) end
     s.points = { { "TOPLEFT", rel, "TOPLEFT", 0, 0 }, { "BOTTOMRIGHT", rel, "BOTTOMRIGHT", 0, 0 } }
   end
   function R:ClearPoint(point)
     local s = S(self)
     for i, p in ipairs(s.points) do if p[1] == point then table.remove(s.points, i); return end end
   end
+  function R:AdjustPointsOffset(dx, dy)
+    for _, p in ipairs(S(self).points) do p[4] = p[4] + dx; p[5] = p[5] + dy end
+  end
   function R:SetWidth(w) S(self).width = w end
   function R:SetHeight(h) S(self).height = h end
   function R:SetSize(w, h) local s = S(self); s.width = w; s.height = h or w end
-  function R:GetWidth() return S(self).width end
-  function R:GetHeight() return S(self).height end
-  function R:GetSize() local s = S(self); return s.width, s.height end
-  function R:GetScale() return 1 end
-  function R:GetEffectiveScale() return 1 end
-  function R:GetLeft() return 0 end
-  function R:GetRight() return S(self).width end
-  function R:GetTop() return S(self).height end
-  function R:GetBottom() return 0 end
-  function R:GetCenter() local s = S(self); return s.width / 2, s.height / 2 end
-  function R:GetRect() local s = S(self); return 0, 0, s.width, s.height end
+  local function resolved(self)
+    local l, b, w, h = layout.rect(sim, self)
+    if not l then return nil end
+    local es = layout.effectiveScale(state, self)
+    return l / es, b / es, w / es, h / es
+  end
+  function R:GetWidth()
+    local s = S(self)
+    if (s.width or 0) ~= 0 then return s.width end
+    local _, _, w = resolved(self)
+    return w or 0
+  end
+  function R:GetHeight()
+    local s = S(self)
+    if (s.height or 0) ~= 0 then return s.height end
+    local _, _, _, h = resolved(self)
+    return h or 0
+  end
+  function R:GetSize() return self:GetWidth(), self:GetHeight() end
+  function R:SetScale(sc)
+    if type(sc) ~= "number" or sc <= 0 then error("Frame:SetScale(): Scale must be > 0", 2) end
+    S(self).scale = sc
+  end
+  function R:GetScale() return S(self).scale or 1 end
+  function R:GetEffectiveScale() return layout.effectiveScale(state, self) end
+  function R:GetLeft() local l = resolved(self); return l end
+  function R:GetBottom() local _, b = resolved(self); return b end
+  function R:GetRight() local l, _, w = resolved(self); return l and l + w end
+  function R:GetTop() local _, b, _, h = resolved(self); return b and b + h end
+  function R:GetCenter()
+    local l, b, w, h = resolved(self)
+    if l then return l + w / 2, b + h / 2 end
+  end
+  function R:GetRect() return resolved(self) end
+  function R:GetScaledRect() return layout.rect(sim, self) end
+  function R:IsRectValid() return layout.rect(sim, self) ~= nil end
+  function R:Intersects(other)
+    local l1, b1, w1, h1 = layout.rect(sim, self)
+    local l2, b2, w2, h2 = layout.rect(sim, other)
+    if not l1 or not l2 then return false end
+    return l1 < l2 + w2 and l2 < l1 + w1 and b1 < b2 + h2 and b2 < b1 + h1
+  end
+  function R:IsMouseOver(top, bottom, left, right)
+    local l, b, w, h = layout.rect(sim, self)
+    if not l or not sim._isVisible(self) then return false end
+    local x, y = sim.cursorX or -1, sim.cursorY or -1
+    return x >= l + (left or 0) and x <= l + w + (right or 0) and y >= b + (bottom or 0) and y <= b + h + (top or 0)
+  end
+  function R:IsMouseMotionFocus() return sim.mouseFocus == self end
   function R:SetAlpha(a) S(self).alpha = a end
   function R:GetAlpha() return S(self).alpha end
   function R:GetEffectiveAlpha()
@@ -160,7 +209,6 @@ function M.install(sim, env)
     while o and state[o] do a = a * state[o].alpha; o = state[o].parent end
     return a
   end
-  function R:IsMouseOver() return sim.mouseFocus == self end
   function R:SetVertexColor(r, g, b, a) S(self).color = { r, g, b, a or 1 } end
   function R:GetVertexColor() return unpack(S(self).color or { 1, 1, 1, 1 }) end
 
@@ -186,12 +234,21 @@ function M.install(sim, env)
 
   ---------------------------------------------------------------- Frame
   local F = define("Frame", "Region")
+  local function known(event, method)
+    if sim.knownEvents and not sim.knownEvents[event] then
+      error(string.format('Frame:%s(): Attempt to register unknown event "%s"', method, tostring(event)), 3)
+    end
+  end
   function F:RegisterEvent(event)
     if type(event) ~= "string" then error("Usage: frame:RegisterEvent(\"event\")", 2) end
+    known(event, "RegisterEvent")
     sim:_registerEvent(self, event)
+    return true
   end
   function F:RegisterUnitEvent(event, ...)
+    known(event, "RegisterUnitEvent")
     sim:_registerEvent(self, event, select("#", ...) > 0 and { ... } or nil)
+    return true
   end
   function F:UnregisterEvent(event) sim:_unregisterEvent(self, event) end
   function F:UnregisterAllEvents()
@@ -200,10 +257,21 @@ function M.install(sim, env)
   end
   function F:RegisterAllEvents() S(self).allEvents = true; sim.allEventFrames[self] = true end
   function F:IsEventRegistered(event) return S(self).events[event] ~= nil or S(self).allEvents end
-  function F:CreateFontString(name, layer, inherits) return M.create(sim, "FontString", name, self, inherits) end
-  function F:CreateTexture(name, layer, inherits) return M.create(sim, "Texture", name, self, inherits) end
-  function F:CreateMaskTexture(name, layer, inherits) return M.create(sim, "Texture", name, self, inherits) end
-  function F:CreateLine(name, layer, inherits) return M.create(sim, "Texture", name, self, inherits) end
+  local function region(t, self, name, layer, inherits, sublevel)
+    local r = M.create(sim, t, name, self, inherits)
+    local rs = state[r]
+    rs.layer = layer or "ARTWORK"
+    rs.sublevel = sublevel or 0
+    return r
+  end
+  function F:CreateFontString(name, layer, inherits, sublevel)
+    local fs = region("FontString", self, name, layer, nil, sublevel)
+    if inherits then fs:SetFontObject(inherits) end
+    return fs
+  end
+  function F:CreateTexture(name, layer, inherits, sublevel) return region("Texture", self, name, layer, inherits, sublevel) end
+  function F:CreateMaskTexture(name, layer, inherits, sublevel) return region("MaskTexture", self, name, layer, inherits, sublevel) end
+  function F:CreateLine(name, layer, inherits, sublevel) return region("Line", self, name, layer, inherits, sublevel) end
   function F:GetChildren()
     local out = {}
     for _, c in ipairs(S(self).children) do if state[c].isFrame then out[#out + 1] = c end end
@@ -215,7 +283,22 @@ function M.install(sim, env)
     for _, c in ipairs(S(self).children) do if not state[c].isFrame then out[#out + 1] = c end end
     return unpack(out)
   end
-  function F:SetFrameStrata(v) S(self).strata = v end
+  function F:SetFrameStrata(v)
+    v = type(v) == "string" and v:upper() or v
+    if not layout.STRATA[v] then error("Frame:SetFrameStrata(): Unknown strata " .. tostring(v), 2) end
+    S(self).strata = v
+    for _, c in ipairs(S(self).children) do
+      if state[c].isFrame and not state[c].fixedStrata then c:SetFrameStrata(v) end
+    end
+  end
+  function F:SetFixedFrameStrata(v) S(self).fixedStrata = v end
+  function F:SetFixedFrameLevel(v) S(self).fixedLevel = v end
+  function F:Raise()
+    local top = 0
+    for _, s2 in pairs(state) do if s2.isFrame and s2.strata == S(self).strata and (s2.level or 0) > top then top = s2.level end end
+    S(self).level = top + 1
+  end
+  function F:Lower() S(self).level = 0 end
   function F:GetFrameStrata() return S(self).strata end
   function F:SetFrameLevel(v) S(self).level = v end
   function F:GetFrameLevel() return S(self).level end
@@ -227,14 +310,48 @@ function M.install(sim, env)
   function F:SetMovable(v) S(self).movable = v and true or false end
   function F:IsMovable() return S(self).movable end
   function F:RegisterForDrag(...) S(self).dragButtons = { ... } end
-  function F:StartMoving() S(self).moving = true end
-  function F:StopMovingOrSizing() S(self).moving = false end
-  function F:IsUserPlaced() return false end
-  function F:SetBackdrop(b) S(self).backdrop = b end
-  function F:GetBackdrop() return S(self).backdrop end
+  function F:StartMoving()
+    local s = S(self)
+    if not s.movable then error("Frame " .. (s.name or "") .. " is not movable", 2) end
+    s.moving = true
+  end
+  function F:StartSizing(point)
+    local s = S(self)
+    if not s.resizable then error("Frame " .. (s.name or "") .. " is not resizable", 2) end
+    s.sizing = point or "BOTTOMRIGHT"
+  end
+  function F:StopMovingOrSizing()
+    local s = S(self)
+    if s.moving or s.sizing then
+      -- the client re-anchors a moved frame to a single TOPLEFT point
+      local l, b, w, h = layout.rect(sim, self)
+      if l then
+        local es = layout.effectiveScale(state, self)
+        s.points = { { "TOPLEFT", env.UIParent, "BOTTOMLEFT", l / es, (b + h) / es } }
+        if s.sizing then s.width, s.height = w / es, h / es end
+      end
+      s.userPlaced = true
+    end
+    s.moving, s.sizing = false, nil
+  end
+  function F:IsDragging() return S(self).moving or false end
+  function F:SetResizable(v) S(self).resizable = v and true or false end
+  function F:IsResizable() return S(self).resizable or false end
+  function F:SetUserPlaced(v) S(self).userPlaced = v and true or false end
+  function F:IsUserPlaced() return S(self).userPlaced or false end
+  function F:SetResizeBounds(minW, minH, maxW, maxH) S(self).resizeBounds = { minW, minH, maxW, maxH } end
+  function F:GetResizeBounds() return unpack(S(self).resizeBounds or { 0, 0, 0, 0 }) end
   function F:GetAttribute(k) return S(self).attributes[k] end
-  function F:SetAttribute(k, v) S(self).attributes[k] = v; fire(self, "OnAttributeChanged", k, v) end
-  function F:IsProtected() return false end
+  function F:SetAttribute(k, v)
+    S(self).attributes[k] = v
+    fire(self, "OnAttributeChanged", k, v)
+    require("wowapi.secure").onAttributeChanged(sim, self, k, v)
+  end
+  function F:SetAttributeNoHandler(k, v) S(self).attributes[k] = v end
+  function F:ClearAttribute(k) S(self).attributes[k] = nil end
+  function F:ClearAttributes() S(self).attributes = {} end
+  function F:GetAttributes() return S(self).attributes end
+  function F:IsProtected() local p = S(self).protected or false; return p, p end
 
   ---------------------------------------------------------------- Button
   local B = define("Button", "Frame")
@@ -257,14 +374,23 @@ function M.install(sim, env)
     B["Set" .. n .. "Texture"] = function(self, tex)
       local s = S(self)
       if type(tex) ~= "table" then
+        if tex == nil then s.textures[n] = nil; return end
         local t = M.create(sim, "Texture", nil, self)
         t:SetTexture(tex)
         tex = t
       end
+      local ts = state[tex]
+      ts.buttonSlot = n
+      ts.layer = n == "Highlight" and "HIGHLIGHT" or (n == "Normal" and "BACKGROUND" or "ARTWORK")
+      if #ts.points == 0 then tex:SetAllPoints(self) end
       s.textures[n] = tex
     end
     B["Get" .. n .. "Texture"] = function(self) return S(self).textures[n] end
-    B["Set" .. n .. "Atlas"] = function(self, atlas) self["Set" .. n .. "Texture"](self, atlas) end
+    B["Set" .. n .. "Atlas"] = function(self, atlas)
+      local t = M.create(sim, "Texture", nil, self)
+      t:SetAtlas(atlas)
+      self["Set" .. n .. "Texture"](self, t)
+    end
   end
   function B:Click(button, down)
     local s = S(self)
@@ -392,8 +518,27 @@ function M.install(sim, env)
 
   ------------------------------------------------------------ GameTooltip
   local GT = define("GameTooltip", "Frame")
-  function GT:SetOwner(owner, anchor) local s = S(self); s.owner = owner; s.anchor = anchor; s.lines = {} end
-  function GT:GetOwner() return S(self).owner end
+  local TIP_ANCHORS = {
+    ANCHOR_RIGHT = { "BOTTOMLEFT", "TOPRIGHT" }, ANCHOR_LEFT = { "BOTTOMRIGHT", "TOPLEFT" },
+    ANCHOR_TOP = { "BOTTOM", "TOP" }, ANCHOR_BOTTOM = { "TOP", "BOTTOM" },
+    ANCHOR_TOPLEFT = { "BOTTOMLEFT", "TOPLEFT" }, ANCHOR_TOPRIGHT = { "BOTTOMRIGHT", "TOPRIGHT" },
+    ANCHOR_BOTTOMLEFT = { "TOPRIGHT", "BOTTOMLEFT" }, ANCHOR_BOTTOMRIGHT = { "TOPLEFT", "BOTTOMRIGHT" },
+  }
+  function GT:SetOwner(owner, anchor, x, y)
+    local s = S(self)
+    s.owner, s.anchor, s.lines = owner, anchor or "ANCHOR_LEFT", {}
+    s.width, s.height = 0, 0
+    s.points = {}
+    local a = TIP_ANCHORS[s.anchor]
+    if a and owner then
+      table.insert(s.points, { a[1], owner, a[2], x or 0, y or 0 })
+    elseif s.anchor == "ANCHOR_CURSOR" then
+      table.insert(s.points, { "BOTTOMLEFT", env.UIParent, "BOTTOMLEFT", (sim.cursorX or 0) + 10, (sim.cursorY or 0) + 10 })
+    end
+  end
+  function GT:GetOwner() return S(self).owner, S(self).anchor end
+  function GT:GetAnchorType() return S(self).anchor end
+  function GT:SetAnchorType(a, x, y) local s = S(self); self:SetOwner(s.owner, a, x, y) end
   function GT:IsOwned(o) return S(self).owner == o end
   function GT:ClearLines() S(self).lines = {} end
   function GT:SetText(t, r, g, b)
@@ -416,11 +561,26 @@ function M.install(sim, env)
   function FS:GetText() return S(self).text end
   function FS:SetFormattedText(fmt, ...) S(self).text = string.format(fmt, ...) end
   function FS:SetFont(f, sz, flags) S(self).font = { f, sz, flags or "" }; return true end
-  function FS:GetFont() return unpack(S(self).font or { "Fonts\\FRIZQT__.TTF", 12, "" }) end
-  function FS:SetFontObject(o) S(self).fontObject = o end
+  function FS:GetFont() return layout.fontOf(sim, self) end
+  function FS:SetFontObject(o)
+    if type(o) == "string" then
+      local name = o
+      o = sim:Get(name)
+      if not o then error("FontString:SetFontObject(): Couldn't find font object '" .. name .. "'", 2) end
+    end
+    local s = S(self)
+    s.fontObject = o
+    s.font = nil
+    local fs = o and state[o]
+    if fs and fs.justifyH and not s.justifyH then s.justifyH = fs.justifyH end
+  end
   function FS:GetFontObject() return S(self).fontObject end
   function FS:SetTextColor(r, g, b, a) S(self).textColor = { r, g, b, a or 1 } end
-  function FS:GetTextColor() return unpack(S(self).textColor or { 1, 1, 1, 1 }) end
+  function FS:GetTextColor()
+    local s = S(self)
+    local c = s.textColor or (s.fontObject and state[s.fontObject] and state[s.fontObject].textColor) or { 1, 1, 1, 1 }
+    return c[1], c[2], c[3], c[4] or 1
+  end
   function FS:SetJustifyH(v) S(self).justifyH = v end
   function FS:GetJustifyH() return S(self).justifyH or "CENTER" end
   function FS:SetJustifyV(v) S(self).justifyV = v end
@@ -432,7 +592,8 @@ function M.install(sim, env)
   function FS:IsTruncated() return false end
 
   ---------------------------------------------------------------- Texture
-  local T = define("Texture", "Region")
+  define("TextureBase", "Region")
+  local T = define("Texture", "TextureBase")
   function T:SetTexture(t) S(self).texture = t; return true end
   function T:GetTexture() return S(self).texture end
   function T:GetTextureFileID() return type(S(self).texture) == "number" and S(self).texture or nil end
@@ -449,7 +610,7 @@ function M.install(sim, env)
   function T:GetDrawLayer() return S(self).layer or "ARTWORK" end
 
   ---------------------------------------------------------------- Font
-  local Font = define("Font", nil)
+  local Font = define("Font", "Object")
   function Font:GetName() return S(self).name end
   function Font:GetObjectType() return "Font" end
   function Font:IsObjectType(t) return t == "Font" end
@@ -466,6 +627,26 @@ function M.install(sim, env)
   function Font:SetSpacing() end
 
   sim.widgetClasses = classes
+  docs.defineClasses(classes, define)
+  require("wowapi.animation").install(sim, classes, define, state, S, M.create)
+  -- Every other documented method, generated from Blizzard's API docs.
+  docs.installWidgets(sim, classes, define, state)
+  -- Like the client, each widget type's metatable __index is one flat
+  -- table holding every method (addons iterate it with pairs).
+  for _, cls in pairs(classes) do
+    local c = cls.parent
+    while c do
+      for k, v in pairs(c.methods) do
+        if rawget(cls.methods, k) == nil then rawset(cls.methods, k, v) end
+      end
+      c = c.parent
+    end
+  end
+  sim.frameTypes = {}
+  for name, cls in pairs(classes) do
+    if isa(cls, "Frame") then sim.frameTypes[name:lower()] = name end
+  end
+  sim.frameTypes.checkbox = "CheckButton"
 
   function visible(obj)
     local o = obj
@@ -480,20 +661,8 @@ function M.install(sim, env)
   sim._isVisible = visible
 end
 
-local TYPE_ALIAS = {
-  frame = "Frame", button = "Button", checkbutton = "CheckButton", statusbar = "StatusBar",
-  slider = "Slider", editbox = "EditBox", scrollframe = "ScrollFrame", cooldown = "Cooldown",
-  gametooltip = "GameTooltip", messageframe = "MessageFrame",
-  scrollingmessageframe = "ScrollingMessageFrame", model = "Model", playermodel = "PlayerModel",
-  fontstring = "FontString", texture = "Texture", font = "Font",
-  -- Uncommon types fall back to Frame behaviour.
-  dressupmodel = "PlayerModel", tabardmodel = "PlayerModel", cinematicmodel = "PlayerModel",
-  colorselect = "Frame", simplehtml = "Frame", minimap = "Frame", movieframe = "Frame",
-  modelscene = "Frame", eventframe = "Frame", unitpositionframe = "Frame",
-}
-
 function M.create(sim, otype, name, parent, templates)
-  local tname = TYPE_ALIAS[tostring(otype):lower()]
+  local tname = sim.widgetClasses[otype] and otype or sim.frameTypes[tostring(otype):lower()]
   if not tname then error("CreateFrame: Unknown frame type '" .. tostring(otype) .. "'", 3) end
   local cls = sim.widgetClasses[tname]
   local env = sim.env
@@ -509,40 +678,24 @@ function M.create(sim, otype, name, parent, templates)
     points = {}, scripts = {}, hooks = {}, events = {}, children = {}, attributes = {},
     enabled = true, checked = false, min = 0, max = 0, value = 0, text = (tname == "EditBox") and "" or nil,
     level = 1, strata = "MEDIUM", textures = {}, lines = {}, messages = {}, mouse = false,
-    isFrame = not (tname == "FontString" or tname == "Texture" or tname == "Font"),
+    isFrame = isa(cls, "Frame"),
     templates = templates,
   }
+  sim.seq = (sim.seq or 0) + 1
+  s.seq = sim.seq
+  if parent and state[parent] then
+    s.level = (state[parent].level or 0) + 1
+    s.strata = state[parent].strata or "MEDIUM"
+  end
+  if isa(cls, "Button") or isa(cls, "EditBox") or isa(cls, "Slider") then s.mouse = true end
   state[obj] = s
   setmetatable(obj, { __index = cls.methods, __tostring = function() return tname .. ": " .. (name or "anonymous") end })
   if parent then obj:SetParent(parent) end
-  if name then env[name] = obj end
   sim.frameCount = sim.frameCount + 1
 
-  -- A few popular templates expose child regions that addons reach for.
+  if name then env[name] = obj end
   if templates and s.isFrame then
-    local t = tostring(templates)
-    if t:find("UICheckButtonTemplate") or t:find("InterfaceOptionsCheckButtonTemplate")
-      or t:find("ChatConfigCheckButtonTemplate") then
-      obj.Text = M.create(sim, "FontString", name and (name .. "Text"), obj)
-      obj.text = obj.Text
-    end
-    if t:find("OptionsSliderTemplate") or t:find("UISliderTemplate") then
-      obj.Text = M.create(sim, "FontString", name and (name .. "Text"), obj)
-      obj.Low = M.create(sim, "FontString", name and (name .. "Low"), obj)
-      obj.High = M.create(sim, "FontString", name and (name .. "High"), obj)
-    end
-    if t:find("UIPanelButtonTemplate") or t:find("UIPanelCloseButton") then
-      obj.Text = M.create(sim, "FontString", name and (name .. "Text"), obj)
-      s.fontString = obj.Text
-    end
-    if t:find("ScrollFrameTemplate") then
-      obj.ScrollBar = M.create(sim, "Slider", name and (name .. "ScrollBar"), obj)
-    end
-    if t:find("BasicFrameTemplate") or t:find("PortraitFrameTemplate") or t:find("ButtonFrameTemplate") then
-      obj.TitleText = M.create(sim, "FontString", name and (name .. "TitleText"), obj)
-      obj.CloseButton = M.create(sim, "Button", name and (name .. "CloseButton"), obj)
-      obj.CloseButton:SetScript("OnClick", function() obj:Hide() end)
-    end
+    require("wowapi.templates").apply(sim, obj, templates, M.create)
   end
   return obj
 end

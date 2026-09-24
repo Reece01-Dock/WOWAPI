@@ -1,2 +1,4 @@
 ## Interface: 16001
+## Title: XmlAddon
+Mixins.lua
 Frames.xml

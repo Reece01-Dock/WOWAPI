@@ -17,7 +17,8 @@ wowtest - WoW: Forever addon test harness (Interface ]] .. WoW.INTERFACE .. [[)
 
 Usage:
   wowtest test [paths...] [-v] [-f pattern]   Run spec files (default: addons spec)
-  wowtest check <addon dir...> [--legacy]     Smoke-test addons: load, login, report
+  wowtest check <addon dir...> [--legacy] [--screenshot ui.svg]
+                                              Smoke-test addons: load, login, report
   wowtest run <addon dir...> [--name N] [--class C] [--level L]
                                               Interactive console
   wowtest new <AddonName>                     Create addons/<AddonName> from a template
@@ -102,6 +103,10 @@ function commands.check(args)
       if alias then print("Trying " .. alias); sim:Slash(alias) end
     end
   end
+  if flags.screenshot then
+    sim:Screenshot(flags.screenshot, { outlines = flags.outlines ~= nil })
+    print("Screenshot written to " .. flags.screenshot)
+  end
   sim:Logout()
   if #sim.chat > 0 then
     print("\nChat output:")
@@ -143,6 +148,8 @@ Logged in as ]] .. sim.player.name .. [[ (]] .. sim.player.class .. [[ ]] .. sim
   = <expr>             evaluate Lua in the game     lua <code>       run Lua in the game
   combat on|off        enter/leave combat           reload           /reload (saves variables)
   target <name>        set a target                 report           errors, stubs, leaks
+  hover <Frame>        mouse over a frame           drag <F> <dx> <dy>  drag a frame
+  mouse <x> <y>        move the mouse               screenshot [file.svg]  render the UI
   quit                 log out and save SavedVariables to ]] .. flags.wtf)
   while true do
     io.write("> ")
@@ -182,6 +189,19 @@ Logged in as ]] .. sim.player.name .. [[ (]] .. sim.player.class .. [[ ]] .. sim
       sim:Reload()
     elseif cmd == "target" then
       sim:SetTarget(rest ~= "" and { name = rest, hostile = true } or nil)
+    elseif cmd == "screenshot" then
+      local path = rest ~= "" and rest or "screenshot.svg"
+      sim:Screenshot(path, { outlines = true })
+      print("Wrote " .. path .. " (open it in a browser)")
+    elseif cmd == "mouse" then
+      local x, y = rest:match("(%-?[%d.]+)%s+(%-?[%d.]+)")
+      local f = sim:MoveMouse(tonumber(x) or 0, tonumber(y) or 0)
+      print("Mouse over: " .. (f and (f:GetDebugName()) or "nothing"))
+    elseif cmd == "drag" then
+      local name, dx, dy = rest:match("(%S+)%s+(%-?[%d.]+)%s+(%-?[%d.]+)")
+      if name then sim:Drag(name, tonumber(dx), tonumber(dy)) else print("Usage: drag <Frame> <dx> <dy>") end
+    elseif cmd == "hover" then
+      sim:Hover(rest)
     elseif cmd == "report" then
       print(sim:Report())
     else

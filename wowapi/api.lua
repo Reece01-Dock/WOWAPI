@@ -248,7 +248,7 @@ function M.install(sim, env)
   rawset(env, "secureexecuterange", function(t, fn, ...) for k, v in pairs(t) do env.securecall(fn, k, v, ...) end end)
   rawset(env, "issecure", function() return false end)
   rawset(env, "issecurevariable", function() return true, nil end)
-  rawset(env, "InCombatLockdown", function() return sim.inCombat end)
+  rawset(env, "InCombatLockdown", function() return sim.lockdown end)
   rawset(env, "hooksecurefunc", function(tbl, name, hook)
     if type(tbl) == "string" then tbl, name, hook = env, tbl, name end
     local orig = tbl[name]
@@ -279,7 +279,7 @@ function M.install(sim, env)
   rawset(env, "GetScreenWidth", function() return 1920 end)
   rawset(env, "GetScreenHeight", function() return 1080 end)
   rawset(env, "GetPhysicalScreenSize", function() return 1920, 1080 end)
-  rawset(env, "GetCursorPosition", function() return 0, 0 end)
+  rawset(env, "GetCursorPosition", function() return sim.cursorX or 0, sim.cursorY or 0 end)
   rawset(env, "IsShiftKeyDown", function() return sim.modifiers.shift or false end)
   rawset(env, "IsControlKeyDown", function() return sim.modifiers.ctrl or false end)
   rawset(env, "IsAltKeyDown", function() return sim.modifiers.alt or false end)
@@ -309,12 +309,34 @@ function M.install(sim, env)
   rawset(env, "StopMusic", function() end)
 
   -- CVars
+  local function cvarGet(n)
+    local v = sim.cvars[n]
+    if v == nil and sim.cvarDefaults then v = sim.cvarDefaults[n] end
+    if v ~= nil then return tostring(v) end
+  end
   local cvar = {
-    GetCVar = function(n) return sim.cvars[n] end,
-    SetCVar = function(n, v) sim.cvars[n] = v ~= nil and tostring(v) or nil; return true end,
-    GetCVarBool = function(n) return sim.cvars[n] == "1" end,
-    GetCVarDefault = function() return nil end,
-    RegisterCVar = function(n, v) if sim.cvars[n] == nil then sim.cvars[n] = tostring(v) end end,
+    GetCVar = cvarGet,
+    SetCVar = function(n, v)
+      if cvarGet(n) == nil and not (sim.registeredCVars or {})[n] then return false end
+      local old = cvarGet(n)
+      sim.cvars[n] = v ~= nil and tostring(v) or nil
+      if tostring(old) ~= tostring(v) then sim:FireEvent("CVAR_UPDATE", n, tostring(v)) end
+      return true
+    end,
+    GetCVarBool = function(n) return cvarGet(n) == "1" end,
+    GetCVarNumberOrDefault = function(n) return tonumber(cvarGet(n)) or 0 end,
+    GetCVarDefault = function(n) local d = sim.cvarDefaults and sim.cvarDefaults[n]; return d ~= nil and tostring(d) or nil end,
+    RegisterCVar = function(n, v)
+      sim.registeredCVars = sim.registeredCVars or {}
+      sim.registeredCVars[n] = true
+      if sim.cvars[n] == nil then sim.cvars[n] = v ~= nil and tostring(v) or "" end
+    end,
+    GetCVarInfo = function(n)
+      local v = cvarGet(n)
+      if v == nil then return nil end
+      local d = sim.cvarDefaults and sim.cvarDefaults[n]
+      return v, d ~= nil and tostring(d) or v, false, false, false, false, false
+    end,
   }
   rawset(env, "C_CVar", cvar)
 
@@ -775,9 +797,47 @@ function M.install(sim, env)
   }
   rawset(env, "C_AddOns", addonsApi)
 
+  ------------------------------------------------------------ backdrops (BackdropTemplateMixin)
+  local backdropMixin = {}
+  local function bstate(self) return sim.widgetState[self] end
+  function backdropMixin:SetBackdrop(info) bstate(self).backdrop = info; bstate(self).backdropColor = nil; bstate(self).backdropBorderColor = nil end
+  function backdropMixin:GetBackdrop() return bstate(self).backdrop end
+  function backdropMixin:ClearBackdrop() bstate(self).backdrop = nil end
+  function backdropMixin:ApplyBackdrop() end
+  function backdropMixin:OnBackdropLoaded() end
+  function backdropMixin:OnBackdropSizeChanged() end
+  function backdropMixin:HasBackdropInfo(info) return bstate(self).backdrop == info end
+  function backdropMixin:SetBackdropColor(r, g, b, a)
+    if not bstate(self).backdrop then return end
+    bstate(self).backdropColor = { r, g, b, a or 1 }
+  end
+  function backdropMixin:GetBackdropColor()
+    local c = bstate(self).backdropColor
+    if c then return c[1], c[2], c[3], c[4] end
+    if bstate(self).backdrop then return 1, 1, 1, 1 end
+  end
+  function backdropMixin:SetBackdropBorderColor(r, g, b, a)
+    if not bstate(self).backdrop then return end
+    bstate(self).backdropBorderColor = { r, g, b, a or 1 }
+  end
+  function backdropMixin:GetBackdropBorderColor()
+    local c = bstate(self).backdropBorderColor
+    if c then return c[1], c[2], c[3], c[4] end
+    if bstate(self).backdrop then return 1, 1, 1, 1 end
+  end
+  rawset(env, "BackdropTemplateMixin", backdropMixin)
+  rawset(env, "BACKDROP_TOOLTIP_16_16_5555", { bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = true, tileEdge = true, tileSize = 16, edgeSize = 16,
+    insets = { left = 5, right = 5, top = 5, bottom = 5 } })
+  rawset(env, "BACKDROP_DIALOG_32_32", { bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border", tile = true, tileEdge = true, tileSize = 32, edgeSize = 32,
+    insets = { left = 11, right = 12, top = 12, bottom = 11 } })
+  rawset(env, "BACKDROP_DARK_DIALOG_32_32", env.BACKDROP_DIALOG_32_32)
+
   ------------------------------------------------------------ frames
   rawset(env, "CreateFrame", function(otype, name, parent, template, id)
     if type(otype) ~= "string" then error("CreateFrame: frameType must be a string", 2) end
+    if not sim.frameTypes[otype:lower()] then error("CreateFrame: Unknown frame type '" .. otype .. "'", 2) end
     local f = widgets.create(sim, otype, name, parent, template)
     if id and f.SetID then f:SetID(id) end
     return f
@@ -789,7 +849,11 @@ function M.install(sim, env)
   local function frame(t, name, parent) return widgets.create(sim, t, name, parent) end
   local UIParent = frame("Frame", "UIParent")
   UIParent:SetSize(1920, 1080)
-  frame("Frame", "WorldFrame")
+  sim.widgetState[UIParent].fixedRect = { 0, 0, 1920, 1080 }
+  sim.widgetState[UIParent].level = 0
+  local world = frame("Frame", "WorldFrame")
+  sim.widgetState[world].fixedRect = { 0, 0, 1920, 1080 }
+  sim.widgetState[world].strata = "WORLD"
   frame("Frame", "Minimap", UIParent)
   frame("Frame", "AddonCompartmentFrame", UIParent)
   local tooltip = frame("GameTooltip", "GameTooltip", UIParent)
@@ -807,12 +871,27 @@ function M.install(sim, env)
   local rw = frame("MessageFrame", "RaidWarningFrame", UIParent)
   rawset(env, "RaidNotice_AddMessage", function(f, msg) table.insert(sim.uiErrors, tostring(msg)) end)
   rawset(env, "RaidBossEmoteFrame", rw)
-  for _, n in ipairs({ "GameFontNormal", "GameFontHighlight", "GameFontNormalSmall", "GameFontHighlightSmall",
-    "GameFontNormalLarge", "GameFontHighlightLarge", "GameFontDisable", "GameFontDisableSmall", "GameFontRed",
-    "GameFontGreen", "GameFontWhite", "GameFontNormalHuge", "NumberFontNormal", "NumberFontNormalSmall",
-    "ChatFontNormal", "SystemFont_Med1", "SystemFont_Small", "GameFontNormalMed3", "GameFontHighlightMedium",
-    "GameTooltipText", "GameTooltipHeaderText", "Tooltip_Med", "QuestFont" }) do
-    widgets.create(sim, "Font", n)
+  local GOLD, WHITE, GRAY, RED, GREEN = { 1, 0.82, 0, 1 }, { 1, 1, 1, 1 }, { 0.5, 0.5, 0.5, 1 }, { 1, 0.1, 0.1, 1 }, { 0.1, 1, 0.1, 1 }
+  for n, def in pairs({
+    GameFontNormal = { 12, GOLD }, GameFontHighlight = { 12, WHITE }, GameFontNormalSmall = { 10, GOLD },
+    GameFontHighlightSmall = { 10, WHITE }, GameFontNormalLarge = { 16, GOLD }, GameFontHighlightLarge = { 16, WHITE },
+    GameFontDisable = { 12, GRAY }, GameFontDisableSmall = { 10, GRAY }, GameFontRed = { 12, RED },
+    GameFontGreen = { 12, GREEN }, GameFontWhite = { 12, WHITE }, GameFontNormalHuge = { 20, GOLD },
+    NumberFontNormal = { 14, WHITE, "OUTLINE" }, NumberFontNormalSmall = { 12, WHITE, "OUTLINE" },
+    ChatFontNormal = { 14, WHITE }, SystemFont_Med1 = { 12, WHITE }, SystemFont_Small = { 10, WHITE },
+    GameFontNormalMed3 = { 14, GOLD }, GameFontHighlightMedium = { 14, WHITE }, GameTooltipText = { 12, WHITE },
+    GameTooltipHeaderText = { 14, WHITE }, Tooltip_Med = { 12, WHITE }, QuestFont = { 13, { 0.18, 0.12, 0.06, 1 } },
+    GameFontNormalOutline = { 12, GOLD, "OUTLINE" }, GameFontHighlightOutline = { 12, WHITE, "OUTLINE" },
+    GameFontNormalLeft = { 12, GOLD }, GameFontHighlightLeft = { 12, WHITE }, GameFontBlack = { 12, { 0, 0, 0, 1 } },
+    GameFontNormalMed1 = { 13, GOLD }, GameFontNormalMed2 = { 14, GOLD }, GameFontHighlightMed2 = { 14, WHITE },
+    GameFontNormalTiny = { 9, GOLD }, GameFontHighlightExtraSmall = { 9, WHITE }, SystemFont_Large = { 16, WHITE },
+    SystemFont_Huge1 = { 20, WHITE }, Game15Font = { 15, WHITE }, Game18Font = { 18, WHITE },
+  }) do
+    local f = widgets.create(sim, "Font", n)
+    local fs = sim.widgetState[f]
+    fs.font = { "Fonts\\FRIZQT__.TTF", def[1], def[3] or "" }
+    fs.textColor = def[2]
+    if n:find("Left$") then fs.justifyH = "LEFT" end
   end
   rawset(env, "STANDARD_TEXT_FONT", "Fonts\\FRIZQT__.TTF")
   rawset(env, "UNIT_NAME_FONT", "Fonts\\FRIZQT__.TTF")
@@ -921,32 +1000,39 @@ function M.install(sim, env)
     end
   end
   rawset(env, "EventRegistry", registry)
-  rawset(env, "EventUtil", {
-    ContinueOnAddOnLoaded = function(name, fn)
-      if sim.addons[name] and sim.addons[name].loaded then fn(); return end
-      local owner = {}
-      registry:RegisterFrameEventAndCallback("ADDON_LOADED", function(_, loaded)
-        if loaded == name then registry:UnregisterFrameEventAndCallback("ADDON_LOADED", owner); fn() end
-      end, owner)
-    end,
-    RegisterOnceFrameEventAndCallback = function(event, fn)
-      local owner = {}
-      registry:RegisterFrameEventAndCallback(event, function(_, ...)
-        registry:UnregisterFrameEventAndCallback(event, owner)
-        fn(...)
-      end, owner)
-    end,
-    ContinueAfterAllEvents = function(fn, ...)
-      local pending = { ... }
-      local left = #pending
-      for _, e in ipairs(pending) do
-        env.EventUtil.RegisterOnceFrameEventAndCallback(e, function()
-          left = left - 1
-          if left == 0 then fn() end
-        end)
+  -- Same semantics as Blizzard_SharedXML/EventUtil.lua
+  local EventUtil = {}
+  function EventUtil.RegisterOnceFrameEventAndCallback(frameEvent, callback, ...)
+    local required = { n = select("#", ...), ... }
+    local owner = {}
+    registry:RegisterFrameEventAndCallback(frameEvent, function(_, ...)
+      for i = 1, required.n do
+        if select(i, ...) ~= required[i] then return end
       end
-    end,
-  })
+      registry:UnregisterFrameEventAndCallback(frameEvent, owner)
+      callback(...)
+    end, owner)
+  end
+  function EventUtil.ContinueOnAddOnLoaded(addOnName, callback)
+    if sim.addons[addOnName] and sim.addons[addOnName].loaded then callback(); return end
+    EventUtil.RegisterOnceFrameEventAndCallback("ADDON_LOADED", callback, addOnName)
+  end
+  function EventUtil.ContinueOnPlayerLogin(callback)
+    if sim.loggedIn then callback(); return end
+    EventUtil.RegisterOnceFrameEventAndCallback("PLAYER_LOGIN", callback)
+  end
+  function EventUtil.ContinueAfterAllEvents(callback, ...)
+    local left = select("#", ...)
+    for i = 1, left do
+      EventUtil.RegisterOnceFrameEventAndCallback((select(i, ...)), function()
+        left = left - 1
+        if left == 0 then callback() end
+      end)
+    end
+  end
+  function EventUtil.RegisterForCallbacks() end
+  rawset(env, "EventUtil", EventUtil)
+
 
   ------------------------------------------------------------ settings panel (mainline)
   local function newCategory(name, frame_, parent)

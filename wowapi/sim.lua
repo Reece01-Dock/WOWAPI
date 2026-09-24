@@ -5,6 +5,9 @@ local toc = require("wowapi.toc")
 local serialize = require("wowapi.serialize")
 local widgets = require("wowapi.widgets")
 local api = require("wowapi.api")
+local docs = require("wowapi.docs")
+local layout = require("wowapi.layout")
+local render = require("wowapi.render")
 local unpack = compat.unpack
 
 local Sim = {}
@@ -47,6 +50,10 @@ function Sim:_reset()
   self.epoch = opts.now or 1790000000 -- deterministic server time()
   self.loggedIn = false
   self.inCombat = false
+  self.lockdown = false
+  self.hardwareEvent = false
+  self.menus = {}
+  self.menuModifiers = {}
   self.eventFrames = {}
   self.allEventFrames = setmetatable({}, { __mode = "k" })
   self.onUpdateFrames = {}
@@ -92,6 +99,10 @@ function Sim:_reset()
   local sim = self
   setmetatable(env, {
     __index = function(_, k)
+      if sim._lazyGlobal then
+        local v, found = sim._lazyGlobal(k)
+        if found then return v end
+      end
       if type(k) == "string" then sim.undefinedGlobals[k] = (sim.undefinedGlobals[k] or 0) + 1 end
       return nil
     end,
@@ -102,8 +113,16 @@ function Sim:_reset()
       rawset(t, k, v)
     end,
   })
+  require("wowapi.templates").install(self, env)
   widgets.install(self, env)
   api.install(self, env)
+  docs.install(self, env)
+  require("wowapi.input").install(self, env)
+  require("wowapi.framexml").install(self, env)
+  require("wowapi.secure").install(self, env)
+  require("wowapi.xml").install(self)
+  require("wowapi.resources").install(self, env)
+  require("wowapi.secrets").install(self, env)
 end
 
 -------------------------------------------------------------------- utils
@@ -165,6 +184,11 @@ end
 
 -- Fire a game event at every frame registered for it.
 function Sim:FireEvent(event, ...)
+  if self.knownEvents and not self.knownEvents[event] and not (self.warnedEvents or {})[event] then
+    self.warnedEvents = self.warnedEvents or {}
+    self.warnedEvents[event] = true
+    self:_warn("FireEvent: '" .. tostring(event) .. "' is not a documented game event")
+  end
   table.insert(self.firedEvents, { event = event, args = { n = select("#", ...), ... } })
   local list = self.eventFrames[event]
   if list then
@@ -189,6 +213,9 @@ function Sim:FireEvent(event, ...)
   local cbs = self.eventCallbacks[event]
   if cbs then
     for _, cb in ipairs({ unpack(cbs) }) do self:_pcall(cb.fn, cb.owner, ...) end
+  end
+  if self.stateDrivers and next(self.stateDrivers) and event ~= "ADDON_ACTION_BLOCKED" and event ~= "ADDON_ACTION_FORBIDDEN" then
+    require("wowapi.secure").evaluateDrivers(self)
   end
 end
 
@@ -237,6 +264,7 @@ function Sim:Advance(seconds, step)
     for _, frame in ipairs({ unpack(self.onUpdateFrames) }) do
       if self._isVisible(frame) then self:_runScript(frame, "OnUpdate", dt) end
     end
+    require("wowapi.animation").tick(self, dt)
     local due = {}
     for _, t in ipairs(self.timers) do
       if not t.cancelled and t.at <= self.time + 1e-9 then due[#due + 1] = t end
@@ -277,16 +305,13 @@ end
 
 function Sim:_runFile(addon, path, ns)
   if path:lower():match("%.xml$") then
-    local files, unsupported = toc.xmlFiles(path)
-    if not files then
-      self:_error(addon.name .. ": cannot open " .. path)
-      return
-    end
-    if #unsupported > 0 then
-      self:_warn(string.format("%s: %s declares %d XML frame(s); XML frames are not emulated, create them in Lua to test them",
-        addon.name, path, #unsupported))
-    end
-    for _, f in ipairs(files) do self:_runFile(addon, toc.join(toc.dirname(path), f), ns) end
+    require("wowapi.xml").loadFile(self, path, addon, function(p)
+      if not toc.exists(p) then
+        self:_error(string.format("%s: file referenced in %s not found: %s", addon.name, path, p))
+      else
+        self:_runFile(addon, p, ns)
+      end
+    end)
     return
   end
   local chunk, err = compat.loadfile(path, self.env)
@@ -333,6 +358,10 @@ function Sim:LoadAddon(spec, _hintDir)
   if not t then return false, err end
   local existing = self.addons[t.name]
   if existing then return existing.loaded, existing.ns end
+  if not t.gameTypeOk then
+    self:_warn(string.format("%s: not loaded, its .toc excludes the '%s' game type", t.name, toc.GAME_TYPE))
+    return false, "INCOMPATIBLE"
+  end
   local addon = { name = t.name, toc = t, dir = dir, ns = {}, loaded = false, loading = true }
   self.addons[t.name] = addon
   table.insert(self.addonOrder, t.name)
@@ -371,6 +400,8 @@ function Sim:LoadAddon(spec, _hintDir)
       self:_runFile(addon, path, addon.ns)
     end
   end
+  local bindings = toc.join(dir, "Bindings.xml")
+  if toc.exists(bindings) then require("wowapi.xml").loadBindings(self, bindings, addon) end
   self.currentAddon = prev
 
   -- SavedVariables are applied after the addon's files ran, before ADDON_LOADED.
@@ -530,22 +561,170 @@ function Sim:Exec(code)
   return self:_pcall(fn)
 end
 
-function Sim:Get(name) return rawget(self.env, name) end
+-- Read a global from the game environment (without counting it as an
+-- undefined-global read).
+function Sim:Get(name)
+  local v = rawget(self.env, name)
+  if v == nil and self._lazyGlobal then v = self._lazyGlobal(name) end
+  return v
+end
 
+local function frameArg(self, frame)
+  if type(frame) == "string" then
+    local f = self:Get(frame)
+    if not f then error("no frame named " .. frame, 3) end
+    return f
+  end
+  return frame
+end
+
+-- Click a frame directly (like frame:Click(), ignores what's on top of it).
 function Sim:Click(frame, button)
-  if type(frame) == "string" then frame = assert(rawget(self.env, frame), "no frame named " .. frame) end
+  frame = frameArg(self, frame)
+  self.hardwareEvent = true
   if frame.Click then frame:Click(button) else self:_runScript(frame, "OnClick", button or "LeftButton", false) end
+  self.hardwareEvent = false
   self:_afterInput()
 end
 
+-- Move the cursor to screen coordinates (origin bottom-left, 1920x1080),
+-- firing OnLeave/OnEnter as the frame under the mouse changes.
+function Sim:MoveMouse(x, y)
+  self.cursorX, self.cursorY = x, y
+  local top = layout.framesAt(self, x, y)[1]
+  if top ~= self.mouseFocus then
+    local old = self.mouseFocus
+    self.mouseFocus = top
+    if old then self:_runScript(old, "OnLeave", true) end
+    if top then self:_runScript(top, "OnEnter", true) end
+  end
+  return top
+end
+
+-- Frame under the cursor (or under x, y).
+function Sim:FrameAt(x, y)
+  return layout.framesAt(self, x or self.cursorX or 0, y or self.cursorY or 0)[1]
+end
+
+local function center(self, frame)
+  local l, b, w, h = layout.rect(self, frame)
+  if not l then error("frame has no position (no SetPoint?)", 3) end
+  return l + w / 2, b + h / 2
+end
+
+-- Move the mouse over a frame (to its center) - fires OnEnter.
 function Sim:Hover(frame)
-  self.mouseFocus = frame
-  self:_runScript(frame, "OnEnter", true)
+  frame = frameArg(self, frame)
+  local l = layout.rect(self, frame)
+  if l and frame:IsVisible() then
+    self:MoveMouse(center(self, frame))
+    if self.mouseFocus ~= frame then
+      -- covered by another frame or not mouse-enabled: deliver anyway like a direct call
+      self.mouseFocus = frame
+      self:_runScript(frame, "OnEnter", true)
+    end
+  else
+    self.mouseFocus = frame
+    self:_runScript(frame, "OnEnter", true)
+  end
 end
 
 function Sim:Leave(frame)
+  frame = frameArg(self, frame)
   if self.mouseFocus == frame then self.mouseFocus = nil end
   self:_runScript(frame, "OnLeave", true)
+end
+
+local function clickRegistered(self, frame, button, up)
+  local s = self.widgetState[frame]
+  local list = s.clicks or { "LeftButtonUp" }
+  local want = button .. (up and "Up" or "Down")
+  for _, c in ipairs(list) do
+    if c == want or c == "AnyUp" and up or c == "AnyDown" and not up then return true end
+  end
+  return false
+end
+
+-- A real mouse click at screen coordinates (or on a frame's center): goes to
+-- whatever frame is on top there, with OnMouseDown/OnMouseUp/OnClick in order.
+function Sim:ClickAt(x, y, button)
+  if type(x) == "table" or type(x) == "string" then
+    button = y
+    x, y = center(self, frameArg(self, x))
+  end
+  button = button or "LeftButton"
+  local target = self:MoveMouse(x, y)
+  if not target then return nil end
+  self:_runScript(target, "OnMouseDown", button)
+  local s = self.widgetState[target]
+  if target:IsObjectType("EditBox") then target:SetFocus() end
+  if target:IsObjectType("Button") and s.enabled ~= false and clickRegistered(self, target, button, true) then
+    self.hardwareEvent = true
+    target:Click(button, false)
+    self.hardwareEvent = false
+  end
+  if self.widgetState[target] then self:_runScript(target, "OnMouseUp", button, true) end
+  self:_afterInput()
+  return target
+end
+
+-- Drag a frame by (dx, dy) with the mouse: OnMouseDown, OnDragStart (if
+-- registered), movement while StartMoving/StartSizing is active,
+-- OnDragStop, OnMouseUp.
+function Sim:Drag(frame, dx, dy, button)
+  frame = frameArg(self, frame)
+  button = button or "LeftButton"
+  local s = self.widgetState[frame]
+  local x, y = center(self, frame)
+  self:MoveMouse(x, y)
+  self:_runScript(frame, "OnMouseDown", button)
+  local canDrag = false
+  for _, b in ipairs(s.dragButtons or {}) do if b == button or b == "Any" then canDrag = true end end
+  if canDrag then self:_runScript(frame, "OnDragStart", button) end
+  if s.moving or s.sizing then
+    local l, b, w, h = layout.rect(self, frame)
+    local es = layout.effectiveScale(self.widgetState, frame)
+    if s.moving then
+      s.points = { { "TOPLEFT", self.env.UIParent, "BOTTOMLEFT", (l + dx) / es, (b + h + dy) / es } }
+    else
+      local nw, nh = math.max(0, w + dx) / es, math.max(0, h - dy) / es
+      local bounds = s.resizeBounds
+      if bounds then
+        nw = math.max(bounds[1] or 0, bounds[3] and bounds[3] > 0 and math.min(bounds[3], nw) or nw)
+        nh = math.max(bounds[2] or 0, bounds[4] and bounds[4] > 0 and math.min(bounds[4], nh) or nh)
+      end
+      s.points = { { "TOPLEFT", self.env.UIParent, "BOTTOMLEFT", l / es, (b + h) / es } }
+      s.width, s.height = nw, nh
+      self:_runScript(frame, "OnSizeChanged", nw, nh)
+    end
+  end
+  self.cursorX, self.cursorY = x + dx, y + dy
+  if canDrag then self:_runScript(frame, "OnDragStop", button) end
+  self:_runScript(frame, "OnMouseUp", button, true)
+  self:_afterInput()
+end
+
+-- Mouse wheel over a frame (delta 1 = up, -1 = down).
+function Sim:Scroll(frame, delta)
+  frame = frameArg(self, frame)
+  local s = self.widgetState[frame]
+  if not (s.mouseWheel or (s.props and s.props.MouseWheelEnabled and s.props.MouseWheelEnabled[1])) then return false end
+  self:_runScript(frame, "OnMouseWheel", delta or 1)
+  return true
+end
+
+-------------------------------------------------------------------- screenshot
+
+-- Render what's on screen to SVG. With a path, writes the file.
+--   sim:Screenshot("ui.svg", { outlines = true })
+function Sim:Screenshot(path, opts)
+  local svg = render.svg(self, opts)
+  if path then
+    local f = assert(io.open(path, "w"))
+    f:write(svg)
+    f:close()
+  end
+  return svg
 end
 
 function Sim:Type(editBox, text)
@@ -556,6 +735,70 @@ end
 
 function Sim:PressEnter(editBox) self:_runScript(editBox, "OnEnterPressed") end
 function Sim:PressEscape(editBox) self:_runScript(editBox, "OnEscapePressed") end
+
+-------------------------------------------------------------------- mocks & call log
+
+local function resolvePath(env, key)
+  local ns, fname = key:match("^([^.]+)%.(.+)$")
+  if ns then return rawget(env, ns), fname end
+  return env, key
+end
+
+-- Replace what a game API function returns. `impl` is a function, or the
+-- value(s) to return. Works for documented and hand-written functions.
+--   sim:Mock("C_Map.GetBestMapForUnit", 2112)
+--   sim:Mock("UnitHealth", function(unit) return unit == "target" and 50 or 100 end)
+function Sim:Mock(key, impl, ...)
+  local fn = impl
+  if type(impl) ~= "function" then
+    local vals = { n = select("#", ...) + 1, impl, ... }
+    fn = function() return unpack(vals, 1, vals.n) end
+  end
+  if self.apiDocs and self.apiDocs.functions[key] then
+    self.mocks[key] = fn
+  else
+    local holder, name = resolvePath(self.env, key)
+    if not holder then holder = {}; rawset(self.env, key:match("^([^.]+)"), holder) end
+    self.unmock = self.unmock or {}
+    if self.unmock[key] == nil then self.unmock[key] = { holder, name, rawget(holder, name) } end
+    rawset(holder, name, fn)
+  end
+end
+
+function Sim:Unmock(key)
+  self.mocks[key] = nil
+  local u = self.unmock and self.unmock[key]
+  if u then rawset(u[1], u[2], u[3]); self.unmock[key] = nil end
+end
+
+-- Calls made to a documented API function: list of argument tables.
+function Sim:Calls(key)
+  local c = self.apiCalls[key]
+  return c and c.log or {}
+end
+
+function Sim:CallCount(key)
+  local c = self.apiCalls[key]
+  return c and c.n or 0
+end
+
+-- Signature of a documented function or widget method, for reference:
+--   sim:Doc("C_Timer.After") / sim:Doc("Frame:SetPoint")
+function Sim:Doc(key)
+  local d = self.apiDocs
+  local typ, method = key:match("^(%w+):(%w+)$")
+  local doc
+  if typ then doc = docs.methodsFor(typ)[method] else doc = d.functions[key] end
+  if not doc then return nil end
+  local function list(t)
+    local o = {}
+    for _, a in ipairs(t) do o[#o + 1] = a[1] .. ": " .. a[2] .. (a[3] and "?" or "") end
+    return table.concat(o, ", ")
+  end
+  local s = key .. "(" .. list(doc.a) .. ")"
+  if #doc.r > 0 then s = s .. " -> " .. list(doc.r) end
+  return s, doc
+end
 
 -------------------------------------------------------------------- world state
 
@@ -574,15 +817,36 @@ function Sim:SetTarget(data)
   self:FireEvent("PLAYER_TARGET_CHANGED")
 end
 
+-- Enter combat. PLAYER_REGEN_DISABLED fires while InCombatLockdown() is
+-- still false (the last chance to touch protected frames); lockdown starts
+-- right after, like in game.
 function Sim:EnterCombat()
+  if self.inCombat then return end
   self.inCombat = true
   self:FireEvent("PLAYER_REGEN_DISABLED")
+  self.lockdown = true
+  require("wowapi.secrets").update(self)
+  require("wowapi.secure").evaluateDrivers(self)
 end
 
 function Sim:LeaveCombat()
+  if not self.inCombat then return end
+  self.lockdown = false
   self.inCombat = false
+  require("wowapi.secrets").update(self)
   self:FireEvent("PLAYER_REGEN_ENABLED")
+  require("wowapi.secure").evaluateDrivers(self)
 end
+
+-- Force secret-value restrictions on/off (nil = follow combat). Needs
+-- WoW.new({ secretValues = true }).
+function Sim:SetSecretRestrictions(on)
+  self.forcedSecretRestrictions = on
+  require("wowapi.secrets").update(self)
+end
+
+-- Actions addons were stopped from doing (ADDON_ACTION_BLOCKED/FORBIDDEN).
+function Sim:BlockedActions() return self.blockedActions end
 
 function Sim:AddItem(id, info)
   info.id = id
@@ -696,6 +960,24 @@ function Sim:Report()
   if #undef > 0 then
     add("Globals read but not defined (not emulated, or a typo?): " .. table.concat(undef, ", "))
   end
+  if #(self.blockedActions or {}) > 0 then
+    add("Blocked by the client's security (ADDON_ACTION_BLOCKED/FORBIDDEN):")
+    for _, b in ipairs(self.blockedActions) do add(string.format("  - [%s] %s: %s", b.kind, b.addon, b.action)) end
+  end
+  -- missing embedded libraries usually means the addon wasn't packaged
+  for _, name in ipairs(self.addonOrder) do
+    local a = self.addons[name]
+    local missingLib = false
+    for _, e in ipairs(self.errors) do
+      if e.message:find(a.dir, 1, true) and e.message:lower():find("/libs?/") and
+        (e.message:find("cannot open") or e.message:find("not found")) then missingLib = true end
+    end
+    if missingLib then
+      local pkg = toc.exists(toc.join(a.dir, ".pkgmeta"))
+      add(string.format("Hint: %s is missing embedded libraries%s. Test the packaged addon (the zip from CurseForge/Wago/GitHub releases) or install them into its Libs folder.",
+        name, pkg and " (its .pkgmeta lists them as externals fetched at packaging time)" or ""))
+    end
+  end
   if #self.errors == 0 then
     add("Lua errors: none")
   else
@@ -704,5 +986,8 @@ function Sim:Report()
   end
   return table.concat(out, "\n")
 end
+
+for k, v in pairs(require("wowapi.input").SimMethods) do Sim[k] = v end
+for k, v in pairs(require("wowapi.framexml").SimMethods) do Sim[k] = v end
 
 return Sim

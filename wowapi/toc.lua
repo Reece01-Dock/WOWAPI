@@ -43,7 +43,7 @@ end
 function M.findToc(dir)
   local name = M.basename(dir)
   if not name or name == "." or name == ".." then return nil, name end
-  for _, suffix in ipairs({ "_Forever", "-Forever", "_Mainline", "-Mainline", "" }) do
+  for _, suffix in ipairs({ "_Camelot", "-Camelot", "_Forever", "-Forever", "_Mainline", "-Mainline", "" }) do
     local p = M.join(dir, name .. suffix .. ".toc")
     if M.exists(p) then return p, name end
   end
@@ -51,6 +51,27 @@ function M.findToc(dir)
 end
 
 -- Parse toc text into { name, metadata = {}, files = {} }.
+-- WoW: Forever's client game type is "camelot" (addons target it with
+-- [AllowLoadGameType camelot]); it is not "standard" (retail).
+M.GAME_TYPE = "camelot"
+M.FAMILY = "Mainline"
+M.GAME = "Camelot"
+
+-- Evaluate [AllowLoadGameType a, b] / [ExcludeLoadGameType a, b] on a line.
+function M.gameTypeAllowed(line, gameType)
+  gameType = (gameType or M.GAME_TYPE):lower()
+  local ok = true
+  for list in line:gmatch("%[AllowLoadGameType%s+([^%]]+)%]") do
+    local found = false
+    for g in list:gmatch("[^,%s]+") do if g:lower() == gameType then found = true end end
+    if not found then ok = false end
+  end
+  for list in line:gmatch("%[ExcludeLoadGameType%s+([^%]]+)%]") do
+    for g in list:gmatch("[^,%s]+") do if g:lower() == gameType then ok = false end end
+  end
+  return ok
+end
+
 function M.parse(text, name)
   local toc = { name = name, metadata = {}, files = {} }
   text = text:gsub("^\239\187\191", "")
@@ -61,17 +82,10 @@ function M.parse(text, name)
       toc.metadata[key:lower()] = val
     elseif not line:match("^%s*#") then
       local file = trim(line)
-      local cond = file:match("%[AllowLoadGameType%s+([^%]]+)%]")
-      file = trim(file:gsub("%[AllowLoad[^%]]*%]", ""))
-      local allowed = true
-      if cond then
-        allowed = false
-        for g in cond:gmatch("[^,%s]+") do
-          if g == "mainline" or g == "standard" or g == "forever" then allowed = true end
-        end
-      end
+      local allowed = M.gameTypeAllowed(file)
+      file = trim(file:gsub("%[%a+LoadGameType[^%]]*%]", ""):gsub("%[AllowLoad[^%]]*%]", ""))
       if file ~= "" and allowed then
-        file = file:gsub("%[Family%]", "Mainline"):gsub("%[Game%]", "Standard"):gsub("\\", "/")
+        file = file:gsub("%[Family%]", M.FAMILY):gsub("%[Game%]", M.GAME):gsub("\\", "/")
         toc.files[#toc.files + 1] = file
       end
     end
@@ -85,6 +99,10 @@ function M.parse(text, name)
   toc.savedVariables = splitList(md.savedvariables)
   toc.savedVariablesPerCharacter = splitList(md.savedvariablespercharacter)
   toc.loadOnDemand = md.loadondemand == "1"
+  -- addon-level game type restrictions
+  local allow, exclude = md.allowloadgametype, md.excludeloadgametype
+  toc.gameTypeOk = M.gameTypeAllowed((allow and ("[AllowLoadGameType " .. allow .. "]") or "")
+    .. (exclude and ("[ExcludeLoadGameType " .. exclude .. "]") or ""))
   return toc
 end
 
