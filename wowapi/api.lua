@@ -85,6 +85,21 @@ function M.install(sim, env)
     rawset(env, k, _G[k])
   end
   rawset(env, "unpack", unpack)
+  rawset(env, "newproxy", rawget(_G, "newproxy") or function(mt)
+    local p = {}
+    if mt then setmetatable(p, {}) end
+    return p
+  end)
+  -- WoW's Lua 5.1 xpcall passes extra arguments to the function (like 5.2+);
+  -- stock 5.1 drops them.
+  if compat.is51 and not compat.isJIT then
+    rawset(env, "xpcall", function(f, handler, ...)
+      local n = select("#", ...)
+      if n == 0 then return xpcall(f, handler) end
+      local args = { ... }
+      return xpcall(function() return f(unpack(args, 1, n)) end, handler)
+    end)
+  end
   rawset(env, "_VERSION", "Lua 5.1")
   rawset(env, "bit", compat.bit)
   rawset(env, "collectgarbage", function(opt)
@@ -211,12 +226,15 @@ function M.install(sim, env)
   ------------------------------------------------------------ time & debug
   local function serverTime() return math.floor(sim.epoch + (sim.time - (sim.opts.startTime or 100.0))) end
   rawset(env, "GetTime", function() return sim.time end)
-  rawset(env, "GetTimePreciseSec", function() return sim.time end)
+  rawset(env, "GetTimePreciseSec", function() return sim.time + (os.clock() - clock0) end)
   rawset(env, "GetServerTime", serverTime)
   rawset(env, "time", function(t) if t then return os.time(t) end return serverTime() end)
   rawset(env, "date", function(fmt, t) return os.date(fmt, t or serverTime()) end)
   rawset(env, "difftime", os.difftime)
-  rawset(env, "debugprofilestop", function() return sim.time * 1000 end)
+  -- debugprofilestop measures real elapsed time (it advances within a
+  -- frame, unlike GetTime); addons use it for time-budgeted loops.
+  local clock0 = os.clock()
+  rawset(env, "debugprofilestop", function() return sim.time * 1000 + (os.clock() - clock0) * 1000 end)
   rawset(env, "debugprofilestart", function() end)
   rawset(env, "debugstack", function(start, count1, count2) return debug.traceback("", (start or 1) + 1) end)
   rawset(env, "debuglocals", function() return "" end)
@@ -231,11 +249,19 @@ function M.install(sim, env)
   })
 
   ------------------------------------------------------------ errors & security
+  -- The default handler is the client's error display: the error counts,
+  -- whether it came from our dispatch or an addon's xpcall(f, geterrorhandler()).
+  local function defaultHandler(msg)
+    local tb = debug.traceback(tostring(msg), 2)
+    table.insert(sim.errors, { message = tostring(msg), traceback = tb })
+    if not sim.quiet then io.stderr:write("|cffff0000Lua error|r: " .. tostring(msg) .. "\n") end
+    return msg
+  end
   rawset(env, "geterrorhandler", function()
-    return sim.errorHandler or function(msg) return msg end
+    return sim.errorHandler or defaultHandler
   end)
   rawset(env, "seterrorhandler", function(fn) sim.errorHandler = fn end)
-  rawset(env, "CallErrorHandler", function(...) if sim.errorHandler then return sim.errorHandler(...) end end)
+  rawset(env, "CallErrorHandler", function(...) return (sim.errorHandler or defaultHandler)(...) end)
   rawset(env, "securecall", function(fn, ...)
     if type(fn) == "string" then fn = rawget(env, fn) end
     local r = { n = 0 }
@@ -654,6 +680,9 @@ function M.install(sim, env)
   local faker = require("wowapi.faker")
   local function fakeItem(id)
     if not sim.fakeData or type(id) ~= "number" or id <= 0 then return nil end
+    local known = false
+    for _, k in ipairs(faker.KNOWN_ITEMS) do if k[1] == id then known = true end end
+    if not known and not faker.exists("item", id) then return nil end
     local i = faker.item(id, sim.player.level)
     sim.items[id] = i
     return i
@@ -708,7 +737,9 @@ function M.install(sim, env)
       if type(ref) == "string" then return nil end
     end
     local id = tonumber(ref)
-    if sim.fakeData and id and id > 0 then
+    local known = false
+    for _, k in ipairs(faker.KNOWN_SPELLS) do if k[1] == id then known = true end end
+    if sim.fakeData and id and id > 0 and (known or faker.exists("spell", id)) then
       s = faker.spell(id)
       sim.spells[id] = s
       sim.spells[s.name] = sim.spells[s.name] or s
@@ -774,6 +805,47 @@ function M.install(sim, env)
   })
   rawset(env, "NUM_BAG_SLOTS", 4)
   rawset(env, "BACKPACK_CONTAINER", 0)
+
+  ------------------------------------------------------------ spellbook
+  -- The player's spellbook: their class's spells (sim.spellbook overrides).
+  local function spellbook()
+    if sim.spellbook then return sim.spellbook end
+    local list = {}
+    if sim.fakeData then
+      for _, k in ipairs(faker.KNOWN_SPELLS) do
+        if k[4] == sim.player.class or k[4] == nil then list[#list + 1] = k[1] end
+      end
+    end
+    return list
+  end
+  local function bookItem(i)
+    local id = spellbook()[i]
+    if not id then return nil end
+    local s = spellRef(id)
+    return s
+  end
+  rawset(env, "C_SpellBook", {
+    GetNumSpellBookSkillLines = function() return #spellbook() > 0 and 1 or 0 end,
+    GetSpellBookSkillLineInfo = function(i)
+      if i ~= 1 or #spellbook() == 0 then return nil end
+      return { name = env.UnitClass("player"), iconID = 136243, itemIndexOffset = 0, numSpellBookItems = #spellbook(),
+        isGuild = false, shouldHide = false, specID = sim.player.specID or 0, offSpecID = 0 }
+    end,
+    GetSpellBookItemInfo = function(i)
+      local s = bookItem(i)
+      if not s then return nil end
+      return { actionID = s.id, spellID = s.id, itemType = 1, name = s.name, subName = "", iconID = s.icon,
+        isPassive = false, isOffSpec = false, skillLineIndex = 1 }
+    end,
+    GetSpellBookItemName = function(i) local s = bookItem(i); if s then return s.name, "" end end,
+    GetSpellBookItemTexture = function(i) local s = bookItem(i); return s and s.icon end,
+    GetSpellBookItemType = function(i) local s = bookItem(i); if s then return 1, s.id, s.id end end,
+    HasPetSpells = function() return nil end,
+    IsSpellBookItemPassive = function() return false end,
+    FindSpellBookSlotForSpell = function(id)
+      for i, sid in ipairs(spellbook()) do if sid == id then return i, 0 end end
+    end,
+  })
 
   ------------------------------------------------------------ textures
   rawset(env, "C_Texture", {

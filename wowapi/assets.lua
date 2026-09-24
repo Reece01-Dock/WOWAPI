@@ -292,11 +292,52 @@ local function download(url, dest)
   return sh("curl -sfL --max-time 60 -o " .. q(dest .. ".part") .. " " .. q(url)) and os.rename(dest .. ".part", dest)
 end
 
+-- Addons' own textures (Interface\AddOns\<Addon>\...): .png used as is,
+-- .tga/.blp converted to PNG in the cache.
+function Store:addonFile(norm)
+  local addon, rest = norm:match("^addons/([^/]+)/(.+)$")
+  if not addon or not self.addonDirs then return nil end
+  local dir = self.addonDirs[addon]
+  if not dir then return nil end
+  self._addonIndex = self._addonIndex or {}
+  local idx = self._addonIndex[addon]
+  if not idx then
+    idx = {}
+    local p = io.popen("cd " .. q(dir) .. " && find . -type f \\( -iname '*.tga' -o -iname '*.blp' -o -iname '*.png' -o -iname '*.jpg' \\) 2>/dev/null")
+    if p then
+      for line in p:lines() do
+        local rel = line:gsub("^%./", "")
+        local key = rel:lower():gsub("\\", "/"):gsub("%.[%a%d]+$", "")
+        -- prefer png > blp > tga when several exist
+        local ext = rel:lower():match("%.(%a+)$")
+        local rank = ({ png = 3, jpg = 3, blp = 2, tga = 1 })[ext] or 0
+        if not idx[key] or idx[key].rank < rank then idx[key] = { path = dir .. SEP .. rel, ext = ext, rank = rank } end
+      end
+      p:close()
+    end
+    self._addonIndex[addon] = idx
+  end
+  local e = idx[rest]
+  if not e then return nil end
+  if e.ext == "png" or e.ext == "jpg" then return e.path end
+  local cached = self.cacheDir .. SEP .. "addonart" .. SEP .. addon .. SEP .. rest:gsub("/", SEP) .. ".png"
+  if exists(cached) then return cached end
+  local data = readAll(e.path)
+  local png = data and require(e.ext == "blp" and "wowapi.blp" or "wowapi.tga").toPNG(data)
+  if not png then return nil end
+  mkdirp((cached:gsub("[/\\][^/\\]*$", "")))
+  local f = io.open(cached, "wb")
+  f:write(png)
+  f:close()
+  return cached
+end
+
 -- Local file for a normalized texture path (downloading it if needed).
 function Store:fileFor(norm)
   if not norm then return nil end
   if self.memo[norm] ~= nil then return self.memo[norm] or nil end
-  local found
+  local found = self:addonFile(norm)
+  if found then self.memo[norm] = found; return found end
   local li = self:localIndex()
   if li and li[norm] then found = li[norm] end
   if not found then

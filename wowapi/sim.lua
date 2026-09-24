@@ -138,6 +138,7 @@ function Sim:_reset()
   require("wowapi.input").install(self, env)
   require("wowapi.framexml").install(self, env)
   if self.fakeData then require("wowapi.fakeapi").install(self, env) end
+  require("wowapi.nameplates").install(self, env)
   require("wowapi.secure").install(self, env)
   require("wowapi.xml").install(self)
   require("wowapi.resources").install(self, env)
@@ -374,7 +375,18 @@ end
 -- Returns true, addonNamespace or false, reason.
 function Sim:LoadAddon(spec, _hintDir)
   local dir = self:_resolveAddon(spec, _hintDir)
-  if not dir then return false, "MISSING" end
+  if not dir then
+    local other = toc.exists(spec) and io.popen('ls "' .. spec .. '"/*.toc 2>/dev/null'):read("*a") or ""
+    if other ~= "" then
+      local flavors = {}
+      for f in other:gmatch("_(%a+)%.toc") do flavors[#flavors + 1] = f end
+      local why = "no .toc for this client (only for: " .. table.concat(flavors, ", ") .. ")"
+      self:_warn(tostring(spec) .. ": " .. why)
+      return false, "INCOMPATIBLE: " .. why
+    end
+    return false, "MISSING"
+  end
+  toc.LOCALE = self.locale
   local t, err = toc.load(dir)
   if not t then return false, err end
   local existing = self.addons[t.name]
@@ -769,6 +781,13 @@ local function findBrowser()
   end
 end
 
+-- Tell the art store where loaded addons live (for their own textures).
+function Sim:_registerAddonArt()
+  local store = self:ArtStore()
+  store.addonDirs = store.addonDirs or {}
+  for name, a in pairs(self.addons) do store.addonDirs[name:lower()] = a.dir end
+end
+
 -- Render what's on screen. Returns the SVG markup; with a path, writes an
 -- .svg file, or a .png (rendered with a headless Chrome/Chromium if found).
 --   sim:Screenshot("ui.svg", { outlines = true })
@@ -778,6 +797,7 @@ end
 function Sim:Screenshot(path, opts)
   opts = opts or {}
   if opts.art == nil then opts.art = self.opts.art end
+  if opts.art then self:_registerAddonArt() end
   local png = path and path:lower():match("%.png$")
   if png then opts.embed = opts.embed ~= false end
   local svg = render.svg(self, opts)
@@ -960,12 +980,18 @@ end
 function Sim:_fakeBags()
   self.bags = self.bags or {}
   local r = faker.rng("bags:" .. tostring(self.opts.player and self.opts.player.name or "Tester"))
+  -- loot: generated items, registered so they exist
+  local function loot()
+    local id = r.int(20000, 180000)
+    self.items[id] = self.items[id] or faker.item(id, self.player.level)
+    return id
+  end
   local backpack = { size = 16, { itemID = 6948, stackCount = 1 }, { itemID = 4540, stackCount = 8 }, { itemID = 159, stackCount = 12 } }
-  for slot = 4, 7 do backpack[slot] = { itemID = r.int(20000, 180000), stackCount = 1 } end
+  for slot = 4, 7 do backpack[slot] = { itemID = loot(), stackCount = 1 } end
   self.bags[0] = backpack
   for bag = 1, 4 do
     local b = { size = 14 }
-    for slot = 1, r.int(2, 6) do b[slot] = { itemID = r.int(20000, 180000), stackCount = r.chance(0.3) and r.int(2, 20) or 1 } end
+    for slot = 1, r.int(2, 6) do b[slot] = { itemID = loot(), stackCount = r.chance(0.3) and r.int(2, 20) or 1 } end
     self.bags[bag] = b
   end
 end
@@ -1225,5 +1251,6 @@ end
 for k, v in pairs(require("wowapi.input").SimMethods) do Sim[k] = v end
 for k, v in pairs(require("wowapi.framexml").SimMethods) do Sim[k] = v end
 for k, v in pairs(require("wowapi.fakeapi").SimMethods) do Sim[k] = v end
+for k, v in pairs(require("wowapi.nameplates").SimMethods) do Sim[k] = v end
 
 return Sim

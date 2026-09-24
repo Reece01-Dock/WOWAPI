@@ -44,6 +44,20 @@ end
 local PROJECTS = { WOW_PROJECT_MAINLINE = 1, WOW_PROJECT_CLASSIC = 2, WOW_PROJECT_BURNING_CRUSADE_CLASSIC = 5,
   WOW_PROJECT_WRATH_CLASSIC = 11, WOW_PROJECT_CATACLYSM_CLASSIC = 14, WOW_PROJECT_MISTS_CLASSIC = 19 }
 
+-- Retail frames addons reference that aren't in the resource frame list.
+local EXTRA_FRAMES = { "MicroMenu", "MicroMenuContainer", "BagsBar", "MainActionBar", "MainMenuBar",
+  "MultiBarBottomLeft", "MultiBarBottomRight", "MultiBarRight", "MultiBarLeft", "MultiBar5", "MultiBar6",
+  "MultiBar7", "StanceBar", "PetActionBar", "PossessActionBar", "OverrideActionBar", "ExtraAbilityContainer",
+  "ExtraActionBarFrame", "ZoneAbilityFrame", "StatusTrackingBarManager", "MainStatusTrackingBarContainer",
+  "SecondaryStatusTrackingBarContainer", "PlayerCastingBarFrame", "PetCastingBarFrame", "QueueStatusButton",
+  "EditModeManagerFrame", "GameMenuFrame", "CharacterMicroButton", "ProfessionMicroButton", "PlayerSpellsMicroButton",
+  "AchievementMicroButton", "QuestLogMicroButton", "GuildMicroButton", "LFDMicroButton", "CollectionsMicroButton",
+  "EJMicroButton", "StoreMicroButton", "MainMenuMicroButton", "HelpMicroButton", "HousingMicroButton",
+  "MainMenuBarBackpackButton", "CharacterBag0Slot", "CharacterBag1Slot", "CharacterBag2Slot", "CharacterBag3Slot",
+  "CharacterReagentBag0Slot", "BagBarExpandToggle", "PlayerFrame", "TargetFrame", "FocusFrame", "PartyFrame",
+  "BuffFrame", "DebuffFrame", "ObjectiveTrackerFrame", "MinimapCluster", "ChatFrameMenuButton", "UIWidgetTopCenterContainerFrame",
+  "MainMenuBarVehicleLeaveButton", "PaladinPowerBarFrame", "MonkHarmonyBarFrame", "RuneFrame", "TotemFrame" }
+
 local SHOWN_FRAMES = { PlayerFrame = true, MainMenuBar = true, MainActionBar = true, MinimapCluster = true,
   ChatFrame1 = true, ObjectiveTrackerFrame = true, BuffFrame = true, MicroMenu = true, BagsBar = true }
 
@@ -63,6 +77,7 @@ function M.sets()
   local r = M.data()
   local s = { frames = {}, fonts = {}, functions = {}, namespaces = {}, mixins = {} }
   for _, n in ipairs(r.frames) do s.frames[n] = true end
+  for _, n in ipairs(EXTRA_FRAMES) do s.frames[n] = true end
   for n, t in pairs(r.templates) do if t[1] == "Font" or t[1] == "FontFamily" then s.fonts[n] = true end end
   for _, n in ipairs(r.globalAPI) do if not n:find("%.") then s.functions[n] = true end end
   for _, n in ipairs(r.frameXML) do
@@ -119,6 +134,66 @@ function M.actionButton(sim, name, id)
   return b
 end
 
+-- Behaviour of Blizzard frames that addons commonly hook into.
+local FRAME_REGISTRIES = { ActionBarButtonEventsFrame = true, ActionBarActionEventsFrame = true,
+  ActionBarButtonUpdateFrame = true, ActionBarButtonRangeCheckFrame = true, ActionBarButtonUsableWatcherFrame = true }
+local VERB = { "Get", "Set", "Is", "Has", "Show", "Hide", "Update", "On", "Register", "Unregister", "Enable",
+  "Disable", "Add", "Remove", "Clear", "Refresh", "Layout", "Can", "Should", "Apply", "Setup", "SetUp", "Init",
+  "Reset", "Toggle", "For", "Evaluate", "Acquire", "Release", "Open", "Close", "Play", "Stop", "Mark", "Try",
+  "Handle", "Check", "Find", "Select", "Lock", "Unlock", "Begin", "End", "Start", "Cancel", "Load", "Save",
+  "Create", "Destroy", "Attach", "Detach", "Process", "Request", "Notify", "Trigger", "Fire", "Invoke", "Run" }
+local function looksLikeMethod(k)
+  for _, v in ipairs(VERB) do
+    if k:sub(1, #v) == v and (#k == #v or k:sub(#v + 1, #v + 1):match("[%u%d_]")) then return true end
+  end
+  return false
+end
+M.looksLikeMethod = looksLikeMethod
+
+-- Blizzard's frames have methods and child regions this simulator doesn't
+-- know by name; on a placeholder, an unknown method-like key is a recorded
+-- no-op and an unknown noun-like key is an empty placeholder child frame.
+function M.blizzardFallback(sim, obj, label)
+  local mt = getmetatable(obj)
+  local base = mt.__index
+  setmetatable(obj, { __tostring = mt.__tostring, __index = function(t, k)
+    local v = type(base) == "table" and base[k] or nil
+    if v ~= nil then return v end
+    if type(k) ~= "string" or not k:match("^%u") then return nil end
+    if looksLikeMethod(k) then
+      local fn = function()
+        local key = label .. ":" .. k
+        sim.stubbedCalls[key] = (sim.stubbedCalls[key] or 0) + 1
+      end
+      rawset(t, k, fn)
+      return fn
+    end
+    local child = require("wowapi.widgets").create(sim, "Frame", nil, t)
+    sim.widgetState[child].placeholder = true
+    sim.widgetState[child].shown = false
+    M.blizzardFallback(sim, child, label .. "." .. k)
+    rawset(t, k, child)
+    return child
+  end })
+end
+
+function M.decorateFrame(sim, name, f)
+  M.blizzardFallback(sim, f, name)
+  if name == "NamePlateDriverFrame" then require("wowapi.nameplates").decorateDriver(sim, f) end
+  if FRAME_REGISTRIES[name] then
+    f.frames = {}
+    function f:RegisterFrame(frame) table.insert(self.frames, frame) end
+    function f:UnregisterFrame(frame)
+      for i = #self.frames, 1, -1 do if self.frames[i] == frame then table.remove(self.frames, i) end end
+    end
+    function f:ForEachFrame(fn) for _, frame in ipairs(self.frames) do fn(frame) end end
+    -- the default action bars register their buttons
+    if name == "ActionBarButtonEventsFrame" or name == "ActionBarActionEventsFrame" then
+      for i = 1, 12 do f:RegisterFrame(sim:Get("ActionButton" .. i)) end
+    end
+  end
+end
+
 function M.install(sim, env)
   local r = M.data()
   local widgets = require("wowapi.widgets")
@@ -143,6 +218,20 @@ function M.install(sim, env)
   for name, vals in pairs(r.enums) do
     enum[name] = enum[name] or {}
     for k, v in pairs(vals) do if enum[name][k] == nil then enum[name][k] = v end end
+  end
+  -- Enum.<Name>Meta = { MinValue, MaxValue, NumValues } like the client
+  for name, vals in pairs(enum) do
+    if type(vals) == "table" and not name:match("Meta$") and enum[name .. "Meta"] == nil then
+      local lo, hi, n = nil, nil, 0
+      for _, v in pairs(vals) do
+        if type(v) == "number" then
+          n = n + 1
+          if not lo or v < lo then lo = v end
+          if not hi or v > hi then hi = v end
+        end
+      end
+      if n > 0 then enum[name .. "Meta"] = { MinValue = lo, MaxValue = hi, NumValues = n } end
+    end
   end
   local consts = rawget(env, "Constants")
   for name, vals in pairs(r.constants) do
@@ -218,6 +307,7 @@ function M.install(sim, env)
         local st = sim.widgetState[f]
         st.shown = SHOWN_FRAMES[k] or false
         st.placeholder = true
+        M.decorateFrame(sim, k, f)
         return f, true
       end
     end
@@ -244,7 +334,13 @@ function M.install(sim, env)
       return t, true
     end
     if sets.mixins[k] then
-      local t = {}
+      local t = setmetatable({}, { __index = function(tbl, key)
+        if type(key) == "string" and key:match("^%u") and looksLikeMethod(key) then
+          local fn = function() sim.stubbedCalls[k .. "." .. key] = (sim.stubbedCalls[k .. "." .. key] or 0) + 1 end
+          rawset(tbl, key, fn)
+          return fn
+        end
+      end })
       rawset(env, k, t)
       return t, true
     end

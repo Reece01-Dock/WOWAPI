@@ -85,7 +85,8 @@ function M.parse(text, name)
       local allowed = M.gameTypeAllowed(file)
       file = trim(file:gsub("%[%a+LoadGameType[^%]]*%]", ""):gsub("%[AllowLoad[^%]]*%]", ""))
       if file ~= "" and allowed then
-        file = file:gsub("%[Family%]", M.FAMILY):gsub("%[Game%]", M.GAME):gsub("\\", "/")
+        file = file:gsub("%[Family%]", M.FAMILY):gsub("%[Game%]", M.GAME):gsub("%[TextLocale%]", M.LOCALE or "enUS")
+          :gsub("\\", "/")
         toc.files[#toc.files + 1] = file
       end
     end

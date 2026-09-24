@@ -10,25 +10,11 @@ local M = {}
 
 ------------------------------------------------------------------ hashing / rng
 
--- 32-bit FNV-1a without bit operations
+-- Fast deterministic string hash (polynomial, 31-bit)
 local function hash(s)
   s = tostring(s)
-  local h = 2166136261
-  for i = 1, #s do
-    local b = s:byte(i)
-    -- h = (h xor b) * 16777619 mod 2^32
-    local lo = h % 256
-    local x = 0
-    local p = 1
-    local a, c = lo, b
-    for _ = 1, 8 do
-      local ba, bc = a % 2, c % 2
-      if ba ~= bc then x = x + p end
-      a, c, p = (a - ba) / 2, (c - bc) / 2, p * 2
-    end
-    h = h - lo + x
-    h = (h * 16777619) % 4294967296
-  end
+  local h = 5381
+  for i = 1, #s do h = (h * 33 + s:byte(i)) % 2147483647 end
   return h
 end
 M.hash = hash
@@ -314,6 +300,13 @@ function M.item(id, level)
   return i
 end
 
+-- Does a (fake) spell/item with this ID exist? Roughly 1 in 4 IDs do, like
+-- the sparse real ID space; well-known ones always do.
+function M.exists(kind, id)
+  if type(id) ~= "number" or id <= 0 or id ~= math.floor(id) then return false end
+  return hash(kind .. ":exists:" .. id) % 4 == 0
+end
+
 -- A complete fake spell for any ID.
 function M.spell(id)
   for _, k in ipairs(M.KNOWN_SPELLS) do
@@ -474,6 +467,21 @@ end
 -- Fake returns for a documented function call.
 function M.returns(key, doc, ...)
   local args = { ... }
+  -- index-based lookups that may return nothing end after a plausible count
+  local mayBeEmpty = false
+  for _, f in ipairs(doc.f or {}) do if f == "MayReturnNothing" then mayBeEmpty = true end end
+  for i, a in ipairs(doc.a) do
+    local v = args[i]
+    if type(v) == "number" and (a[2] == "luaIndex" or a[1]:lower():find("index")) then
+      local cap = 3 + hash(key .. ":count") % 8
+      if v > cap or v < 1 then
+        if mayBeEmpty then return {}, 0 end
+        local out = {}
+        for j, r in ipairs(doc.r) do if not r[3] then out[j] = M.value(M.rng(key), r[2], r[3], r[4], r[1], key) end end
+        return out, #doc.r
+      end
+    end
+  end
   local parts = { key }
   for i = 1, select("#", ...) do parts[#parts + 1] = tostring(args[i]) end
   local r = M.rng(table.concat(parts, "|"))

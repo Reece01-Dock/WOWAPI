@@ -178,6 +178,10 @@ function M.install(sim, env)
       return t.hour, t.min
     end,
     GetZonePVPInfo = function() return sim.player.pvpZone or "friendly" end,
+    GetNumSpecGroups = function() return sim.player.numSpecGroups or 1 end,
+    GetNumTalentGroups = function() return sim.player.numSpecGroups or 1 end,
+    GetActiveSpecGroup = function() return 1 end,
+    GetActiveTalentGroup = function() return 1 end,
   }
   for name, fn in pairs(fns) do rawset(env, name, fn) end
   rawset(env, "INVENTORY_SLOT_NAMES", SLOT_NAMES)

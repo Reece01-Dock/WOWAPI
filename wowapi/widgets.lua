@@ -112,6 +112,10 @@ function M.install(sim, env)
       rel = sim:Get(name)
       if not rel then error("SetPoint(): Couldn't find region named '" .. name .. "'", 2) end
     end
+    if type(relPoint) == "number" and (y == nil) then
+      -- SetPoint(point, relativeTo, offsetX, offsetY)
+      relPoint, x, y = nil, relPoint, x
+    end
     if relPoint ~= nil and (type(relPoint) ~= "string" or not layout.POINTS[relPoint:upper()]) then
       error("Invalid region point " .. tostring(relPoint), 2)
     end
@@ -260,7 +264,7 @@ function M.install(sim, env)
   local function region(t, self, name, layer, inherits, sublevel)
     local r = M.create(sim, t, name, self, inherits)
     local rs = state[r]
-    rs.layer = layer or "ARTWORK"
+    rs.layer = type(layer) == "string" and layer:upper() or "ARTWORK"
     rs.sublevel = sublevel or 0
     return r
   end
@@ -617,7 +621,17 @@ function M.install(sim, env)
   function T:IsDesaturated() return S(self).desaturated or false end
   function T:SetBlendMode(v) S(self).blend = v end
   function T:GetBlendMode() return S(self).blend or "BLEND" end
-  function T:SetDrawLayer(l) S(self).layer = l end
+  function T:SetDrawLayer(l, sub) S(self).layer = type(l) == "string" and l:upper() or l; if sub then S(self).sublevel = sub end end
+  -- gradients: SetGradient("HORIZONTAL"|"VERTICAL", minColor, maxColor)
+  local function colorOf(c)
+    if type(c) == "table" then return { c.r or c[1] or 1, c.g or c[2] or 1, c.b or c[3] or 1, c.a or c[4] or 1 } end
+  end
+  function T:SetGradient(orientation, minColor, maxColor)
+    S(self).gradient = { orientation = tostring(orientation or "HORIZONTAL"):upper(), colorOf(minColor), colorOf(maxColor) }
+  end
+  function T:SetGradientAlpha(orientation, r1, g1, b1, a1, r2, g2, b2, a2)
+    S(self).gradient = { orientation = tostring(orientation):upper(), { r1, g1, b1, a1 }, { r2, g2, b2, a2 } }
+  end
   function T:GetDrawLayer() return S(self).layer or "ARTWORK" end
 
   ---------------------------------------------------------------- Font

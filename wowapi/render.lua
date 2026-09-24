@@ -181,6 +181,22 @@ local function drawTexture(ctx, obj, s, x, y, w, h, alpha, clipFrac)
   if w <= 0 or h <= 0 then return end
   local c = s.color or { 1, 1, 1, 1 }
   local a = (c[4] or 1) * alpha
+  if s.gradient and s.gradient[1] and s.gradient[2] then
+    -- colors multiply the texture (a white color texture shows the gradient)
+    local g = s.gradient
+    local base = s.texture == "color" and c or { 1, 1, 1, 1 }
+    local id = ctx:id("g")
+    local vertical = g.orientation == "VERTICAL"
+    ctx.defs[#ctx.defs + 1] = string.format('<linearGradient id="%s" x1="0" y1="%d" x2="%d" y2="0"><stop offset="0" stop-color="%s" stop-opacity="%.3f"/><stop offset="1" stop-color="%s" stop-opacity="%.3f"/></linearGradient>',
+      id, vertical and 1 or 0, vertical and 0 or 1,
+      rgb(g[1][1] * base[1], g[1][2] * base[2], g[1][3] * base[3]), (g[1][4] or 1) * (base[4] or 1),
+      rgb(g[2][1] * base[1], g[2][2] * base[2], g[2][3] * base[3]), (g[2][4] or 1) * (base[4] or 1))
+    if s.texture == "color" or not ctx.store then
+      ctx:add(string.format('<rect x="%s" y="%s" width="%s" height="%s" fill="url(#%s)" opacity="%.3f"/>',
+        num(x), num(y), num(w * (clipFrac or 1)), num(h), id, alpha))
+      return
+    end
+  end
   if s.texture == "color" then
     ctx:add(string.format('<rect x="%s" y="%s" width="%s" height="%s" fill="%s" opacity="%.3f"/>',
       num(x), num(y), num(w * (clipFrac or 1)), num(h), rgb(c[1], c[2], c[3]), a))

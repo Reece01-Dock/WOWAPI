@@ -244,6 +244,7 @@ M.WIDGETS = {
   { "QuestPOIFrame", "Blob", { "FrameAPIQuestPOI" } },
   { "ScenarioPOIFrame", "Blob", { "FrameAPIScenarioPOI" } },
   { "Checkout", "Frame", { "FrameAPISimpleCheckout" } },
+  { "AuraContainer", "Frame", {} },
   { "Font", "Object", { "SimpleFontAPI" } },
   { "AnimationGroup", "Object", { "SimpleAnimGroupAPI" } },
   { "Animation", "Object", { "SimpleAnimAPI" } },

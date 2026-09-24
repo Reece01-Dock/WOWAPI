@@ -28,6 +28,9 @@ Art & data options (check / run):
   wowtest run <addon dir...> [--name N] [--class C] [--level L]
                                               Interactive console
   wowtest new <AddonName>                     Create addons/<AddonName> from a template
+  wowtest install <owner/repo>... [--into dir] [--libs dir]
+                                              Fetch addons from GitHub and package them (resolve
+                                              .pkgmeta libraries) into .wowtest/AddOns
 ]])
 end
 
@@ -235,6 +238,29 @@ Logged in as ]] .. sim.player.name .. [[ (]] .. sim.player.class .. [[ ]] .. sim
   flushErrors()
   print("SavedVariables written to " .. flags.wtf)
   return 0
+end
+
+function commands.install(args)
+  local srcs, flags = parseFlags(args)
+  if #srcs == 0 then
+    print("Usage: wowtest install <owner/repo | git URL | folder>... [--into dir] [--libs dir]")
+    return 2
+  end
+  local inst = require("wowapi.installer").new({ addonsDir = flags.into, libPaths = { flags.libs } })
+  local all = {}
+  for _, src in ipairs(srcs) do
+    local ok, res = pcall(inst.install, inst, src)
+    if ok then
+      for _, name in ipairs(res) do all[#all + 1] = name end
+      print("Installed " .. src .. ": " .. table.concat(res, ", "))
+    else
+      print("Failed " .. src .. ": " .. tostring(res))
+    end
+  end
+  for _, r in ipairs(inst.report.resolved) do print(string.format("  lib %-45s %s", r.addon .. ": " .. r.lib, r.how)) end
+  for _, m in ipairs(inst.report.missing) do print(string.format("  MISSING %s: %s (%s)", m.addon, m.lib, tostring(m.url))) end
+  print("\nAddOns folder: " .. inst.addonsDir .. "\nTry: ./wowtest check " .. inst.addonsDir .. "/" .. (all[1] or "<Addon>"))
+  return #inst.report.missing == 0 and 0 or 1
 end
 
 function commands.new(args)

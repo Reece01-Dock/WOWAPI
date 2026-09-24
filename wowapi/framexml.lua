@@ -246,6 +246,91 @@ function M.install(sim, env)
   rawset(env, "SpellMixin", SpellMixin)
   rawset(env, "Spell", Spell)
 
+  ------------------------------------------------------------ curves (C_CurveUtil)
+  local function newCurve(color)
+    local c = { points = {}, curveType = 0 }
+    function c:GetType() return self.curveType end
+    function c:SetType(t) self.curveType = t end
+    function c:HasSecretValues() return false end
+    function c:AddPoint(x, y)
+      table.insert(self.points, { x = x, y = y })
+      table.sort(self.points, function(a, b) return a.x < b.x end)
+    end
+    function c:ClearPoints() self.points = {} end
+    function c:SetPoints(list) self.points = {}; for _, p in ipairs(list or {}) do self:AddPoint(p.x or p[1], p.y or p[2]) end end
+    function c:GetPoints() return self.points end
+    function c:GetPointCount() return #self.points end
+    function c:GetPoint(i) return self.points[i] end
+    function c:RemovePoint(i) table.remove(self.points, i) end
+    function c:SetToDefaults() self.points = {} end
+    function c:Copy() local n = newCurve(color); n:SetPoints(self.points); n.curveType = self.curveType; return n end
+    local function lerp(a, b, t)
+      if type(a) == "number" then return a + (b - a) * t end
+      local r = env.CreateColor(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, (a.a or 1) + ((b.a or 1) - (a.a or 1)) * t)
+      return r
+    end
+    function c:Evaluate(x)
+      local pts = self.points
+      if #pts == 0 then return color and env.CreateColor(1, 1, 1, 1) or 0 end
+      if x <= pts[1].x then return pts[1].y end
+      for i = 2, #pts do
+        if x <= pts[i].x then
+          local a, b = pts[i - 1], pts[i]
+          if self.curveType == 1 then return a.y end -- step
+          return lerp(a.y, b.y, (x - a.x) / ((b.x - a.x) ~= 0 and (b.x - a.x) or 1))
+        end
+      end
+      return pts[#pts].y
+    end
+    function c:EvaluateUnpacked(x)
+      local v = self:Evaluate(x)
+      if type(v) == "table" then return v.r, v.g, v.b, v.a or 1 end
+      return v
+    end
+    return c
+  end
+  local cu = rawget(env, "C_CurveUtil") or {}
+  cu.CreateCurve = function() return newCurve(false) end
+  cu.CreateColorCurve = function() return newCurve(true) end
+  cu.EvaluateColorValueFromBoolean = function(state, a, b) if state then return a else return b end end
+  cu.EvaluateColorFromBoolean = function(state, a, b) if state then return a else return b end end
+  rawset(env, "C_CurveUtil", cu)
+
+  -- TextureLoadingGroupMixin (FrameXML)
+  local TLG = {}
+  function TLG:AddTexture(key, tex) self.textures = self.textures or {}; self.textures[key] = tex end
+  function TLG:RemoveTexture(key) if self.textures then self.textures[key] = nil end end
+  function TLG:IsEmpty() return not self.textures or next(self.textures) == nil end
+  function TLG:Reset() self.textures = {} end
+  rawset(env, "TextureLoadingGroupMixin", TLG)
+
+  ------------------------------------------------------------ ItemLocation
+  local ItemLocationMixin = {}
+  function ItemLocationMixin:Clear() self.bagID, self.slotIndex, self.equipmentSlotIndex, self.isBagAndSlot, self.isEquipmentSlot = nil end
+  function ItemLocationMixin:SetBagAndSlot(bag, slot)
+    self:Clear(); self.bagID, self.slotIndex, self.isBagAndSlot = bag, slot, true
+  end
+  function ItemLocationMixin:GetBagAndSlot() return self.bagID, self.slotIndex end
+  function ItemLocationMixin:SetEquipmentSlot(slot)
+    self:Clear(); self.equipmentSlotIndex, self.isEquipmentSlot = slot, true
+  end
+  function ItemLocationMixin:GetEquipmentSlot() return self.equipmentSlotIndex end
+  function ItemLocationMixin:IsEquipmentSlot() return self.isEquipmentSlot or false end
+  function ItemLocationMixin:IsBagAndSlot() return self.isBagAndSlot or false end
+  function ItemLocationMixin:HasAnyLocation() return self:IsEquipmentSlot() or self:IsBagAndSlot() end
+  function ItemLocationMixin:IsValid() return self:HasAnyLocation() end
+  function ItemLocationMixin:IsEqualToBagAndSlot(bag, slot) return self.bagID == bag and self.slotIndex == slot end
+  function ItemLocationMixin:IsEqualToEquipmentSlot(slot) return self.equipmentSlotIndex == slot end
+  function ItemLocationMixin:IsEqualTo(o)
+    return o and self.bagID == o.bagID and self.slotIndex == o.slotIndex and self.equipmentSlotIndex == o.equipmentSlotIndex
+  end
+  rawset(env, "ItemLocationMixin", ItemLocationMixin)
+  rawset(env, "ItemLocation", {
+    CreateEmpty = function() return Mixin({}, ItemLocationMixin) end,
+    CreateFromBagAndSlot = function(_, bag, slot) local l = Mixin({}, ItemLocationMixin); l:SetBagAndSlot(bag, slot); return l end,
+    CreateFromEquipmentSlot = function(_, slot) local l = Mixin({}, ItemLocationMixin); l:SetEquipmentSlot(slot); return l end,
+  })
+
   ------------------------------------------------------------ UI panels
   rawset(env, "UIPanelWindows", {})
   rawset(env, "ShowUIPanel", function(f) if f then f:Show() end end)
@@ -420,6 +505,17 @@ function M.install(sim, env)
   end)
   rawset(env, "ChatFrame_AddMessageGroup", function() end)
   rawset(env, "ChatFrame_RemoveAllMessageGroups", function() end)
+
+  -- number abbreviation (C_StringUtil helpers from FrameXML)
+  local sutil = rawget(env, "C_StringUtil") or {}
+  sutil.GetDefaultAbbreviationBreakpoints = function()
+    local out = {}
+    for _, b in ipairs({ { 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" } }) do
+      out[#out + 1] = { breakpoint = b[1], abbreviation = b[2], significandDivisor = b[1] / 10, fractionDivisor = 10, abbreviationIsGlobal = false }
+    end
+    return out
+  end
+  rawset(env, "C_StringUtil", sutil)
 
   ------------------------------------------------------------ combat log
   rawset(env, "CombatLogGetCurrentEventInfo", function()

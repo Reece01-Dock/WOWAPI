@@ -282,6 +282,26 @@ function M.handle(sim, frame)
     end
   end
   h.GetFrameRef = function(self, label) return M.handle(sim, frame:GetAttribute("frameref-" .. label)) end
+  h.RunAttribute = function(self, name, ...)
+    return M.runSnippet(sim, frame, frame:GetAttribute(name), "self, ...", ...)
+  end
+  h.RunFor = function(self, target, body, ...)
+    return M.runSnippet(sim, (type(target) == "table" and target.__frame) or target, body, "self, ...", ...)
+  end
+  h.Run = function(self, body, ...) return M.runSnippet(sim, frame, body, "self, ...", ...) end
+  h.ChildUpdate = function(self, snippetid, message)
+    for _, c in ipairs({ frame:GetChildren() }) do
+      local body = c:GetAttribute("_childupdate-" .. tostring(snippetid)) or c:GetAttribute("_childupdate")
+      if body then M.runSnippet(sim, c, body, "self, scriptid, message", snippetid, message) end
+    end
+  end
+  h.GetChildList = function(self, t)
+    t = t or {}
+    for _, c in ipairs({ frame:GetChildren() }) do t[#t + 1] = M.handle(sim, c) end
+    return t
+  end
+  h.IsProtected = function() return frame:IsProtected() end
+  h.SetWidth = function(self, v) M.secureCall(sim, frame.SetWidth, frame, v) end
   h.__frame = frame
   sim.handles[frame] = h
   return h

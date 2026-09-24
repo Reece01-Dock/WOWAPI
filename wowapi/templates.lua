@@ -131,6 +131,53 @@ function M.builtins(env)
       bar:SetMinMaxValues(0, y or 0)
     end)
   end
+  -- a standalone legacy scroll bar (Slider with arrow buttons)
+  local function scrollBar(sim, obj, create)
+    local s = sim.widgetState[obj]
+    s.width = s.width ~= 0 and s.width or 16
+    local up = child(sim, create, "Button", obj, "ScrollUpButton", "ScrollUpButton")
+    up:SetSize(18, 16); up:SetPoint("BOTTOM", obj, "TOP")
+    up:SetScript("OnClick", function() obj:SetValue(obj:GetValue() - 20) end)
+    local down = child(sim, create, "Button", obj, "ScrollDownButton", "ScrollDownButton")
+    down:SetSize(18, 16); down:SetPoint("TOP", obj, "BOTTOM")
+    down:SetScript("OnClick", function() obj:SetValue(obj:GetValue() + 20) end)
+    for _, b in ipairs({ up, down }) do
+      local dir = b == up and "Up" or "Down"
+      b:SetNormalTexture("Interface\\Buttons\\UI-ScrollBar-Scroll" .. dir .. "Button-Up")
+      b:SetPushedTexture("Interface\\Buttons\\UI-ScrollBar-Scroll" .. dir .. "Button-Down")
+      b:SetDisabledTexture("Interface\\Buttons\\UI-ScrollBar-Scroll" .. dir .. "Button-Disabled")
+      b:SetHighlightTexture("Interface\\Buttons\\UI-ScrollBar-Scroll" .. dir .. "Button-Highlight")
+      b.Normal, b.Pushed, b.Disabled, b.Highlight = b:GetNormalTexture(), b:GetPushedTexture(), b:GetDisabledTexture(), b:GetHighlightTexture()
+    end
+    obj.ThumbTexture = create(sim, "Texture", s.name and (s.name .. "ThumbTexture"), obj)
+    obj.ThumbTexture:SetTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
+    obj:SetThumbTexture(obj.ThumbTexture)
+  end
+  B.UIPanelScrollBarTemplate = scrollBar
+  B.UIPanelScrollBarTemplateLightBorder = scrollBar
+  B.UIPanelStretchableArtScrollBarTemplate = scrollBar
+  B.MinimalScrollBarTemplate = scrollBar
+  B.UIDropDownMenuTemplate = function(sim, obj, create)
+    local s = sim.widgetState[obj]
+    s.width, s.height = s.width ~= 0 and s.width or 40, 32
+    local function tex(suffix, key, file)
+      local t = child(sim, create, "Texture", obj, suffix, key, "ARTWORK")
+      t:SetTexture("Interface\\Glues\\CharacterCreate\\CharacterCreate-LabelFrame")
+      return t
+    end
+    local l, m, r = tex("Left", "Left"), tex("Middle", "Middle"), tex("Right", "Right")
+    l:SetSize(25, 64); l:SetPoint("TOPLEFT", 0, 17); l:SetTexCoord(0, 0.1953125, 0, 1)
+    m:SetSize(115, 64); m:SetPoint("LEFT", l, "RIGHT"); m:SetTexCoord(0.1953125, 0.8046875, 0, 1)
+    r:SetSize(25, 64); r:SetPoint("LEFT", m, "RIGHT"); r:SetTexCoord(0.8046875, 1, 0, 1)
+    local text = child(sim, create, "FontString", obj, "Text", "Text", "ARTWORK")
+    text:SetFontObject("GameFontHighlightSmall"); text:SetJustifyH("RIGHT"); text:SetSize(0, 10)
+    text:SetPoint("RIGHT", r, "RIGHT", -43, 2)
+    local icon = child(sim, create, "Texture", obj, "Icon", "Icon", "OVERLAY")
+    icon:SetSize(16, 16); icon:SetPoint("LEFT", 30, 2); icon:Hide()
+    local b = child(sim, create, "Button", obj, "Button", "Button")
+    b:SetSize(24, 24); b:SetPoint("TOPRIGHT", r, "TOPRIGHT", -16, -18)
+    b:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up")
+  end
   B.UIPanelScrollFrameTemplate = scroll
   B.ScrollFrameTemplate = scroll
   B.UIPanelScrollFrameCodeTemplate = scroll
@@ -174,7 +221,18 @@ function M.builtins(env)
   end
   B.DefaultPanelTemplate = B.BasicFrameTemplate
   B.DefaultPanelFlatTemplate = B.BasicFrameTemplate
-  B.InsetFrameTemplate = function(sim, obj) B.BackdropTemplate(sim, obj) end
+  B.InsetFrameTemplate = function(sim, obj, create)
+    local bg = child(sim, create, "Texture", obj, "Bg", "Bg", "BACKGROUND")
+    bg:SetAtlas("UI-Frame-InnerBotTile")
+    bg:SetPoint("TOPLEFT", 2, -2)
+    bg:SetPoint("BOTTOMRIGHT", -2, 2)
+    bg:SetVertexColor(0.3, 0.3, 0.3)
+    obj.NineSlice = create(sim, "Frame", nil, obj)
+    obj.NineSlice:SetAllPoints()
+  end
+  B.InsetFrameTemplate2 = B.InsetFrameTemplate
+  B.InsetFrameTemplate3 = B.InsetFrameTemplate
+  B.InsetFrameTemplate4 = B.InsetFrameTemplate
   B.TooltipBorderedFrameTemplate = B.TooltipBackdropTemplate
   B.GameTooltipTemplate = function(sim, obj) end
   B.SharedTooltipTemplate = B.GameTooltipTemplate
