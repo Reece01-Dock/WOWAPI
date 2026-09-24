@@ -1,0 +1,3 @@
+local _, ns = ...
+ns.gameTypes = ns.gameTypes or {}
+table.insert(ns.gameTypes, "camelot")

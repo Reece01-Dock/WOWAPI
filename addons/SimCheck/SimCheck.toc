@@ -1,0 +1,28 @@
+## Interface: 16001
+## Title: SimCheck
+## Notes: Records how the real client behaves so the wowtest simulator can be checked against it. Type /simcheck.
+## Author: wowapi
+## Version: 1.0.0
+## IconTexture: Interface\Icons\INV_Misc_Spyglass_03
+## SavedVariables: SimCheckDB
+
+# which game type / [Game] / [Family] the client really uses
+detect\type_standard.lua [AllowLoadGameType standard]
+detect\type_mainline.lua [AllowLoadGameType mainline]
+detect\type_camelot.lua [AllowLoadGameType camelot]
+detect\type_vanilla.lua [AllowLoadGameType vanilla]
+detect\type_classic.lua [AllowLoadGameType classic]
+detect\type_tbc.lua [AllowLoadGameType tbc]
+detect\type_wrath.lua [AllowLoadGameType wrath]
+detect\type_cata.lua [AllowLoadGameType cata]
+detect\type_mists.lua [AllowLoadGameType mists]
+detect\type_plunderstorm.lua [AllowLoadGameType plunderstorm]
+detect\type_wowlabs.lua [AllowLoadGameType wowlabs]
+detect\type_wowhack.lua [AllowLoadGameType wowhack]
+detect\game_[Game].lua
+detect\family_[Family].lua
+
+Data.lua
+Probes.lua
+Core.lua
+UI.lua

@@ -30,7 +30,10 @@ function Sim.new(opts)
   opts = opts or {}
   local self = setmetatable({}, Sim)
   self.opts = opts
-  self.build = setmetatable(opts.build or {}, { __index = DEFAULT_BUILD })
+  -- facts recorded from the real client (SimCheck) win over the defaults
+  local realclient = require("wowapi.realclient")
+  realclient.applyGlobals()
+  self.build = setmetatable(opts.build or {}, { __index = realclient.build() or DEFAULT_BUILD })
   self.locale = opts.locale or "enUS"
   self.addonPaths = {}
   for _, p in ipairs(opts.addonPaths or {}) do self.addonPaths[#self.addonPaths + 1] = p end

@@ -36,6 +36,10 @@ Art & data options (check / run):
                                               and write a compatibility index (JSON + HTML)
 
 Signed releases (tamper-proof downloads, not DRM):
+  wowtest compare <SimCheck.lua> [--import]   Compare the real client (SavedVariables from the
+                                              SimCheck addon) with the simulator; --import makes
+                                              the simulator use the real values
+
   wowtest keygen [name] [--out dir]           Create an Ed25519 key pair (~/.config/wowtest/keys)
   wowtest sign <dir>... [--key file.key]      Write wowtest.manifest + wowtest.sig for a release
   wowtest verify <dir>... [--pubkey f.pub]    Check files match what the author signed
@@ -52,6 +56,8 @@ local function parseFlags(args)
     elseif a == "-f" or a == "--filter" then flags.filter = args[i + 1]; i = i + 1
     elseif a == "--art" or a == "--no-art" or a == "--outlines" or a == "--offline" or a == "--no-fake"
       or a == "--require-signed" then
+      flags[a:sub(3)] = true
+    elseif a == "--import" and (args[i + 1] == nil or args[i + 1]:match("^%-%-")) then
       flags[a:sub(3)] = true
     elseif a:match("^%-%-") then flags[a:sub(3)] = args[i + 1]; i = i + 1
     else pos[#pos + 1] = a end
@@ -341,6 +347,47 @@ function commands.index(args)
   local jf = assert(io.open(out .. "/index.json", "w")); jf:write(idx.json(index)); jf:close()
   local hf = assert(io.open(out .. "/index.html", "w")); hf:write(idx.html(index)); hf:close()
   print("\nWrote " .. out .. "/index.json and " .. out .. "/index.html")
+  return 0
+end
+
+function commands.compare(args)
+  local pos, flags = parseFlags(args)
+  local path = pos[1]
+  if not path then
+    print("Usage: wowtest compare <.../WTF/Account/<ACCOUNT>/SavedVariables/SimCheck.lua> [--out report.md] [--import]")
+    print("Install addons/SimCheck in the game, log in, type /simcheck, then /reload or log out to save.")
+    return 2
+  end
+  local cal = require("wowapi.calibrate")
+  local real, err = cal.loadSaved(path)
+  if not real then print(err); return 1 end
+  local ok, simr, sim = pcall(cal.runInSim, scriptDir .. "/addons/SimCheck")
+  if not ok then print(simr); return 1 end
+  local sections = cal.compare(real, simr, sim)
+  local c = real.client or {}
+  print(string.format("Real client: %s build %s, interface %s, game type %s, WOW_PROJECT_ID %s",
+    tostring(c.version), tostring(c.build), tostring(c.interface), table.concat(c.gameTypes or {}, "/"), tostring(c.projectId)))
+  local total = 0
+  for _, s in ipairs(sections) do
+    total = total + s.count
+    print(string.format("\n%s: %s", s.title, s.count == 0 and "matches" or (s.count .. " difference(s)")))
+    if s.note then print("  (" .. s.note .. ")") end
+    for i, r in ipairs(s.rows) do
+      if i > 12 then print(string.format("  ... %d more in the report", #s.rows - 12)); break end
+      print("  - " .. r)
+    end
+  end
+  local out = flags.out or ".wowtest/compare/report.md"
+  os.execute('mkdir -p "' .. (out:match("^(.*)/[^/]+$") or ".") .. '"')
+  local f = assert(io.open(out, "w")); f:write(cal.markdown(sections, real)); f:close()
+  print("\nFull report: " .. out)
+  if flags.import then
+    local target = flags.import ~= true and flags.import or (scriptDir .. "/" .. cal.IMPORT_PATH)
+    cal.writeImport(real, target)
+    print("Imported the real client's facts into " .. target .. " (commit it; every sim now uses them).")
+  elseif total > 0 then
+    print("Run again with --import to make the simulator use the real client's values.")
+  end
   return 0
 end
 

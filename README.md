@@ -313,6 +313,43 @@ Results from a run of 13 popular addons (a scripted scenario for each, then a sc
 | Dominos | Its `.toc` has no 16001 interface and no `[Game]` = Camelot bar-state file, so on Forever you get the default bar. |
 | WeakAuras | Only ships Classic-flavor `.toc` files, so it isn't loaded (`INCOMPATIBLE`). |
 
+## Checking the simulator against the real game (SimCheck)
+
+`addons/SimCheck` is an addon for the real WoW: Forever client that records how the client actually behaves. The
+same addon then runs inside the simulator, and `wowtest compare` lists every difference. With `--import`, the
+simulator switches to the real values.
+
+1. Copy `addons/SimCheck` into the game's `Interface/AddOns` folder and log in. SimCheck runs automatically once
+   per client build (about 15 seconds after login), or type `/simcheck run`. `/simcheck` shows its window.
+2. `/reload` or log out, so the game writes `WTF/Account/<ACCOUNT>/SavedVariables/SimCheck.lua`.
+3. Compare, and optionally import:
+
+```sh
+./wowtest compare ".../WTF/Account/<ACCOUNT>/SavedVariables/SimCheck.lua"            # report
+./wowtest compare ".../SimCheck.lua" --import    # write wowapi/data/forever_client.lua; commit it
+```
+
+What SimCheck records:
+- **Client identity:** `GetBuildInfo`, `WOW_PROJECT_ID`, and the real `[AllowLoadGameType]`, `[Game]` and `[Family]`
+  values (found through conditional `.toc` lines).
+- **Blizzard globals:** the type of every one, members of `C_*` namespaces and mixins, `Enum`, numeric constants,
+  and enum-like tables such as `AuraContainerSortMethod`.
+- **Events:** which of the simulator's ~1,800 known events this client accepts, plus the events fired during login
+  and their order.
+- **CVar defaults.**
+- **Layout and text:** text metrics for several fonts, and anchor/layout test cases.
+- **Behaviour checks:** about 25 small checks of how the client's Lua and API behave (`xpcall` arguments, taint,
+  `tostring(frame)`, error messages, ...).
+
+It only records Blizzard's own (secure) globals and default values. It never records other addons' data, your
+settings or your character. The work is spread over frames, so the game doesn't stall. The comparison report goes to
+`.wowtest/compare/report.md`.
+
+`--import` makes every future sim use the real client's build and project ID, game type, enum and constant values,
+event list and CVar defaults. It also adds stubs for Blizzard functions, frames (with their real types) and mixin
+methods the simulator didn't have. `addons/SimCheck/Data.lua` is regenerated from the simulator's data with
+`lua5.1 tools/gen-simcheck-data.lua > addons/SimCheck/Data.lua`.
+
 ## Signed releases and the compatibility index
 
 **Signed releases** protect players from tampered downloads (fake mirrors, re-uploads with injected code). They are
@@ -375,6 +412,8 @@ wowapi/
   input.lua           keyboard and key bindings
   framexml.lua        pools, callback registry, menus, mixins, combat log, ...
   installer.lua       `wowtest install`: GitHub fetch + CurseForge-style packaging
+  calibrate.lua       `wowtest compare`: real client (SimCheck) vs simulator, --import
+  realclient.lua      applies imported real-client facts (data/forever_client.lua)
   signing.lua         signed releases: manifests, Ed25519 signatures, trusted keys
   index.lua           compatibility index (JSON + HTML)
   settingspanel.lua   the Settings window (Settings.OpenToCategory)

@@ -737,6 +737,8 @@ function M.create(sim, otype, name, parent, templates)
   if isa(cls, "Button") or isa(cls, "EditBox") or isa(cls, "Slider") then s.mouse = true end
   state[obj] = s
   setmetatable(obj, { __index = cls.methods, __tostring = function() return tname .. ": " .. (name or "anonymous") end })
+  -- like the client, every UI object holds its C-side userdata at [0]
+  rawset(obj, 0, newproxy and newproxy(false) or {})
   if parent then obj:SetParent(parent) end
   sim.frameCount = sim.frameCount + 1
 

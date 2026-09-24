@@ -82,6 +82,7 @@ end
 
 -- Lookup sets built once per process.
 local setsCache
+function M._resetSets() setsCache = nil end
 function M.sets()
   if setsCache then return setsCache end
   local r = M.data()
@@ -100,6 +101,7 @@ function M.sets()
     end
   end
   for _, n in ipairs(r.mixins) do s.mixins[n] = true end
+  require("wowapi.realclient").extendSets(s)
   setsCache = s
   return s
 end
@@ -246,6 +248,10 @@ function M.install(sim, env)
         v = copy
       end
       rawset(env, k, v)
+    elseif type(v) == "table" and type(rawget(env, k)) == "table" and not sim.widgetState[rawget(env, k)] then
+      -- a hand-written table (SOUNDKIT, ...) gets FrameXML's missing entries
+      local cur = rawget(env, k)
+      for a, b in pairs(v) do if rawget(cur, a) == nil and type(b) ~= "table" then rawset(cur, a, b) end end
     end
   end
   for k, v in pairs(PROJECTS) do rawset(env, k, v) end
@@ -339,7 +345,8 @@ function M.install(sim, env)
     v = r.globals[k]
     if v ~= nil then return v, true end
     if sets.frames[k] then
-      local ok, f = pcall(widgets.create, sim, frameTypeFor(k), k, rawget(env, "UIParent"))
+      local ok, f = pcall(widgets.create, sim, (sets.frameTypes or {})[k] or frameTypeFor(k), k, rawget(env, "UIParent"))
+      if not ok then ok, f = pcall(widgets.create, sim, frameTypeFor(k), k, rawget(env, "UIParent")) end
       if ok then
         local st = sim.widgetState[f]
         st.shown = SHOWN_FRAMES[k] or false
@@ -376,14 +383,19 @@ function M.install(sim, env)
       return t, true
     end
     if sets.mixins[k] then
+      local known = {}
+      for _, m in ipairs((sets.mixinMethods or {})[k] or {}) do known[m] = true end
       local t = setmetatable({}, { __index = function(tbl, key)
-        if type(key) == "string" and key:match("^%u") and looksLikeMethod(key) then
+        if type(key) == "string" and (known[key] or key:match("^%u") and looksLikeMethod(key)) then
           local fn = function() sim.stubbedCalls[k .. "." .. key] = (sim.stubbedCalls[k .. "." .. key] or 0) + 1 end
           rawset(tbl, key, fn)
           return fn
         end
       end })
       sim.blizzardTables[t] = k
+      -- methods the real client's mixin has (recorded by SimCheck) exist up
+      -- front, so Mixin() copies them and hooksecurefunc finds them
+      for _, m in ipairs((sets.mixinMethods or {})[k] or {}) do local _ = t[m] end
       rawset(env, k, t)
       return t, true
     end
@@ -403,6 +415,13 @@ function M.install(sim, env)
 
   -- events
   for _, e in ipairs(r.events) do sim.knownEvents[e] = true end
+  -- the client's own check matches what RegisterEvent accepts
+  local eu = rawget(env, "C_EventUtils") or {}
+  eu.IsEventValid = function(event) return sim.knownEvents[event] == true end
+  rawset(env, "C_EventUtils", eu)
+
+  -- facts recorded from the real client win over everything above
+  require("wowapi.realclient").install(sim, env)
 end
 
 return M
