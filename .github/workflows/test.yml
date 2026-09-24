@@ -1,0 +1,23 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        lua: [lua5.1, luajit]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ${{ matrix.lua }}
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.lua }}
+      - name: Run specs
+        run: ${{ matrix.lua }} ./wowtest test
+      - name: Smoke-test every addon
+        run: |
+          for d in addons/*/; do
+            ${{ matrix.lua }} ./wowtest check "$d" || exit 1
+          done

@@ -1,0 +1,276 @@
+#!/usr/bin/env lua
+-- wowtest: test WoW: Forever addons without launching the game.
+--
+--   ./wowtest test [paths...]        run *_spec.lua files (default: addons/ spec/)
+--   ./wowtest check <addon dir...>   load, log in, and report errors / missing API
+--   ./wowtest run <addon dir...>     interactive console: type /commands, fire events
+--   ./wowtest new <AddonName>        scaffold a new addon in addons/
+local scriptDir = (arg[0]:match("^(.*)[/\\][^/\\]*$")) or "."
+package.path = scriptDir .. "/?.lua;" .. scriptDir .. "/?/init.lua;" .. package.path
+
+local WoW = require("wowapi")
+local toc = require("wowapi.toc")
+
+local function usage()
+  print([[
+wowtest - WoW: Forever addon test harness (Interface ]] .. WoW.INTERFACE .. [[)
+
+Usage:
+  wowtest test [paths...] [-v] [-f pattern]   Run spec files (default: addons spec)
+  wowtest check <addon dir...> [--legacy]     Smoke-test addons: load, login, report
+  wowtest run <addon dir...> [--name N] [--class C] [--level L]
+                                              Interactive console
+  wowtest new <AddonName>                     Create addons/<AddonName> from a template
+]])
+end
+
+local function parseFlags(args)
+  local pos, flags = {}, {}
+  local i = 1
+  while i <= #args do
+    local a = args[i]
+    if a == "-v" or a == "--verbose" then flags.verbose = true
+    elseif a == "--legacy" then flags.legacy = true
+    elseif a == "-f" or a == "--filter" then flags.filter = args[i + 1]; i = i + 1
+    elseif a:match("^%-%-") then flags[a:sub(3)] = args[i + 1]; i = i + 1
+    else pos[#pos + 1] = a end
+    i = i + 1
+  end
+  return pos, flags
+end
+
+local function isDir(p)
+  local ok = os.execute('test -d "' .. p .. '"')
+  return ok == true or ok == 0
+end
+
+local function findSpecs(paths)
+  local files = {}
+  for _, p in ipairs(paths) do
+    if p:match("%.lua$") then
+      files[#files + 1] = p
+    elseif isDir(p) then
+      local h = io.popen('find "' .. p .. '" -type f \\( -name "*_spec.lua" -o -name "*.spec.lua" \\) | sort')
+      for line in h:lines() do files[#files + 1] = line end
+      h:close()
+    end
+  end
+  return files
+end
+
+local function simFor(dirs, flags)
+  local player = {}
+  if flags.name then player.name = flags.name end
+  if flags.class then player.class = flags.class:upper() end
+  if flags.level then player.level = tonumber(flags.level) end
+  if flags.realm then player.realm = flags.realm end
+  local paths = {}
+  for _, d in ipairs(dirs) do paths[#paths + 1] = toc.dirname(d) end
+  return WoW.new({ player = player, addonPaths = paths, legacyGlobals = flags.legacy,
+    savedVariablesDir = flags.wtf, quiet = true })
+end
+
+local commands = {}
+
+function commands.test(args)
+  local paths, flags = parseFlags(args)
+  if #paths == 0 then paths = { scriptDir .. "/addons", scriptDir .. "/spec" } end
+  local files = findSpecs(paths)
+  if #files == 0 then print("No spec files found in: " .. table.concat(paths, ", ")); return 1 end
+  local ok = require("wowapi.testing").run(files, flags)
+  return ok and 0 or 1
+end
+
+function commands.check(args)
+  local dirs, flags = parseFlags(args)
+  if #dirs == 0 then usage(); return 2 end
+  local sim = simFor(dirs, flags)
+  for _, d in ipairs(dirs) do
+    local ok, why = sim:LoadAddon(d)
+    if not ok then print("Failed to load " .. d .. ": " .. tostring(why)) end
+  end
+  sim:Login()
+  sim:Advance(tonumber(flags.seconds) or 5)
+  -- exercise every slash command the addon registered with no arguments
+  if flags.slash ~= "no" then
+    local list = sim:Get("SlashCmdList") or {}
+    local keys = {}
+    for k in pairs(list) do keys[#keys + 1] = k end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+      local alias = sim:Get("SLASH_" .. k .. "1")
+      if alias then print("Trying " .. alias); sim:Slash(alias) end
+    end
+  end
+  sim:Logout()
+  if #sim.chat > 0 then
+    print("\nChat output:")
+    for _, l in ipairs(sim.chat) do print("  " .. l.text) end
+  end
+  print("\n" .. sim:Report())
+  return #sim.errors == 0 and 0 or 1
+end
+
+local function parseValue(s)
+  if s == "true" then return true elseif s == "false" then return false elseif s == "nil" then return nil end
+  local n = tonumber(s)
+  if n then return n end
+  return (s:gsub('^"(.*)"$', "%1"))
+end
+
+function commands.run(args)
+  local dirs, flags = parseFlags(args)
+  if #dirs == 0 then usage(); return 2 end
+  flags.wtf = flags.wtf or ".wowtest/WTF"
+  os.execute('mkdir -p "' .. flags.wtf .. '"')
+  local sim = simFor(dirs, flags)
+  sim.onChat = function(msg) print(WoW.StripCodes(msg)) end
+  local seenErrors = 0
+  local function flushErrors()
+    for i = seenErrors + 1, #sim.errors do print("\27[31mLua error: " .. sim.errors[i].traceback .. "\27[0m") end
+    seenErrors = #sim.errors
+  end
+  for _, d in ipairs(dirs) do
+    local ok, why = sim:LoadAddon(d)
+    if not ok then print("Failed to load " .. d .. ": " .. tostring(why)) end
+  end
+  sim:Login()
+  flushErrors()
+  print([[
+Logged in as ]] .. sim.player.name .. [[ (]] .. sim.player.class .. [[ ]] .. sim.player.level .. [[). Commands:
+  /anything            run a slash command          wait <sec>       advance game time
+  event NAME [args]    fire a game event            click <Frame>    click a named frame
+  = <expr>             evaluate Lua in the game     lua <code>       run Lua in the game
+  combat on|off        enter/leave combat           reload           /reload (saves variables)
+  target <name>        set a target                 report           errors, stubs, leaks
+  quit                 log out and save SavedVariables to ]] .. flags.wtf)
+  while true do
+    io.write("> ")
+    io.flush()
+    local line = io.read("*l")
+    if not line or line == "quit" or line == "exit" then break end
+    line = line:gsub("^%s+", ""):gsub("%s+$", "")
+    local cmd, rest = line:match("^(%S+)%s*(.*)$")
+    if not cmd then
+      -- empty line
+    elseif cmd:sub(1, 1) == "/" then
+      sim:Slash(line)
+    elseif cmd == "event" then
+      local parts = {}
+      for w in rest:gmatch("%S+") do parts[#parts + 1] = w end
+      local name = table.remove(parts, 1)
+      local vals = {}
+      for i, p in ipairs(parts) do vals[i] = parseValue(p) end
+      sim:FireEvent(name, (table.unpack or unpack)(vals, 1, #parts))
+    elseif cmd == "wait" then
+      sim:Advance(tonumber(rest) or 1)
+    elseif cmd == "click" then
+      local f = sim:Get(rest)
+      if f then sim:Click(f) else print("No frame named " .. rest) end
+    elseif cmd == "=" then
+      local res = { sim:Exec("return " .. rest) }
+      if res[1] then
+        local out = {}
+        for i = 2, #res do out[#out + 1] = tostring(res[i]) end
+        print(#out > 0 and table.concat(out, ", ") or "nil")
+      end
+    elseif cmd == "lua" then
+      sim:Exec(rest)
+    elseif cmd == "combat" then
+      if rest == "off" then sim:LeaveCombat() else sim:EnterCombat() end
+    elseif cmd == "reload" then
+      sim:Reload()
+    elseif cmd == "target" then
+      sim:SetTarget(rest ~= "" and { name = rest, hostile = true } or nil)
+    elseif cmd == "report" then
+      print(sim:Report())
+    else
+      print("Unknown command: " .. cmd)
+    end
+    flushErrors()
+  end
+  sim:Logout()
+  flushErrors()
+  print("SavedVariables written to " .. flags.wtf)
+  return 0
+end
+
+function commands.new(args)
+  local name = args[1]
+  if not name or not name:match("^[%a_][%w_]*$") then print("Usage: wowtest new <AddonName>  (letters, digits, _)"); return 2 end
+  local dir = scriptDir .. "/addons/" .. name
+  if isDir(dir) then print(dir .. " already exists"); return 1 end
+  local slash = name:lower()
+  os.execute('mkdir -p "' .. dir .. '/tests"')
+  local files = {
+    [name .. ".toc"] = table.concat({
+      "## Interface: " .. WoW.INTERFACE,
+      "## Title: " .. name,
+      "## Notes: Describe your addon here",
+      "## Author: You",
+      "## Version: 0.1.0",
+      "## SavedVariables: " .. name .. "DB",
+      "",
+      "Core.lua",
+      "",
+    }, "\n"),
+    ["Core.lua"] = [[
+local addonName, ns = ...
+
+local defaults = { enabled = true }
+
+local frame = CreateFrame("Frame")
+frame:RegisterEvent("ADDON_LOADED")
+frame:RegisterEvent("PLAYER_LOGIN")
+frame:SetScript("OnEvent", function(self, event, arg1)
+  if event == "ADDON_LOADED" and arg1 == addonName then
+    {{DB}} = {{DB}} or CopyTable(defaults)
+    ns.db = {{DB}}
+  elseif event == "PLAYER_LOGIN" then
+    print("|cff33ff99" .. addonName .. "|r loaded. Type /{{CMD}}")
+  end
+end)
+
+SLASH_{{KEY}}1 = "/{{CMD}}"
+SlashCmdList["{{KEY}}"] = function(msg)
+  msg = strtrim(msg or ""):lower()
+  if msg == "toggle" then
+    ns.db.enabled = not ns.db.enabled
+    print(addonName .. " is now " .. (ns.db.enabled and "enabled" or "disabled"))
+  else
+    print("Usage: /{{CMD}} toggle")
+  end
+end
+]],
+    ["tests/" .. name .. "_spec.lua"] = [[
+describe("{{NAME}}", function()
+  it("loads without errors and greets on login", function()
+    local sim = Boot()
+    expect(sim:ChatContains("{{NAME}}", true)).to_be(true)
+  end)
+
+  it("toggles and remembers the setting across /reload", function()
+    local sim = Boot()
+    sim:Slash("/{{CMD}} toggle")
+    expect(sim:LastChat()).to_match("disabled")
+    sim:Reload()
+    expect(sim:Get("{{DB}}").enabled).to_be(false)
+  end)
+end)
+]],
+  }
+  local vars = { DB = name .. "DB", KEY = name:upper(), CMD = slash, NAME = name }
+  for f, content in pairs(files) do
+    content = content:gsub("{{(%u+)}}", vars)
+    local h = assert(io.open(dir .. "/" .. f, "w"))
+    h:write(content)
+    h:close()
+  end
+  print("Created " .. dir)
+  print("Run its tests with: ./wowtest test " .. dir)
+  return 0
+end
+
+local cmd = table.remove(arg, 1)
+if not cmd or not commands[cmd] then usage(); os.exit(cmd and 2 or 0) end
+os.exit(commands[cmd](arg))
