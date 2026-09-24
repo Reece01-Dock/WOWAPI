@@ -1,0 +1,3 @@
+local name, ns = ...
+ns.answer = LibThing.Double(21)
+ns.loadedName = name

@@ -1,0 +1,11 @@
+## Interface: 16001
+## Title: Hello Forever
+## Notes: Example addon for the wowapi test harness
+## Author: wowapi
+## Version: 1.0.0
+## SavedVariables: HelloForeverDB
+## SavedVariablesPerCharacter: HelloForeverCharDB
+
+Locales.lua
+Core.lua
+UI.lua

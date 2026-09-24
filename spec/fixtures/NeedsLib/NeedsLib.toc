@@ -1,0 +1,5 @@
+## Interface: 16001
+## Dependencies: LibThing
+## OptionalDeps: NotInstalled
+## X-Website: https://example.com
+NeedsLib.lua

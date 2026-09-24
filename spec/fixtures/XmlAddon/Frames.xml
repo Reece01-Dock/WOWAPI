@@ -1,0 +1,71 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+  <!-- <Script file="Commented.lua"/> -->
+  <Script file="Code.lua"/>
+
+  <Font name="XmlAddonTitleFont" inherits="GameFontNormal" height="18" virtual="true">
+    <Color r="0.2" g="0.8" b="1"/>
+  </Font>
+
+  <Button name="XmlRowTemplate" mixin="XmlRowMixin" virtual="true">
+    <Size x="180" y="20"/>
+    <Layers>
+      <Layer level="ARTWORK">
+        <FontString parentKey="Label" inherits="GameFontHighlight" justifyH="LEFT">
+          <Anchors><Anchor point="LEFT" x="4"/></Anchors>
+        </FontString>
+      </Layer>
+    </Layers>
+    <Scripts>
+      <OnLoad method="OnLoad"/>
+      <OnClick method="OnClick"/>
+    </Scripts>
+  </Button>
+
+  <Frame name="XmlAddonFrame" parent="UIParent" mixin="XmlPanelMixin" inherits="BackdropTemplate" movable="true" enableMouse="true">
+    <Size x="200" y="120"/>
+    <Anchors>
+      <Anchor point="CENTER">
+        <Offset><AbsDimension x="10" y="-20"/></Offset>
+      </Anchor>
+    </Anchors>
+    <KeyValues>
+      <KeyValue key="titleText" value="From XML" type="string"/>
+      <KeyValue key="maxRows" value="2" type="number"/>
+    </KeyValues>
+    <Layers>
+      <Layer level="BACKGROUND">
+        <Texture parentKey="Bg" setAllPoints="true">
+          <Color r="0" g="0" b="0" a="0.7"/>
+        </Texture>
+      </Layer>
+      <Layer level="OVERLAY">
+        <FontString parentKey="Title" inherits="XmlAddonTitleFont">
+          <Anchors><Anchor point="TOP" y="-8"/></Anchors>
+        </FontString>
+      </Layer>
+    </Layers>
+    <Frames>
+      <Button name="$parentRow1" parentArray="Rows" inherits="XmlRowTemplate" id="1">
+        <Anchors><Anchor point="TOPLEFT" relativeKey="$parent.Title" relativePoint="BOTTOMLEFT" x="-60" y="-10"/></Anchors>
+      </Button>
+      <Button name="$parentRow2" parentArray="Rows" inherits="XmlRowTemplate" id="2">
+        <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRow1" relativePoint="BOTTOMLEFT"/></Anchors>
+      </Button>
+      <Button parentKey="Close" inherits="UIPanelCloseButton">
+        <Anchors><Anchor point="TOPRIGHT"/></Anchors>
+      </Button>
+    </Frames>
+    <Animations>
+      <AnimationGroup parentKey="FadeIn" setToFinalAlpha="true">
+        <Alpha fromAlpha="0" toAlpha="1" duration="0.5"/>
+        <Scripts><OnFinished>XmlAddonFaded = true</OnFinished></Scripts>
+      </AnimationGroup>
+    </Animations>
+    <Scripts>
+      <OnLoad method="OnLoad"/>
+      <OnEvent method="OnEvent"/>
+      <OnShow>self.FadeIn:Play()</OnShow>
+      <OnDragStart>self:StartMoving()</OnDragStart>
+    </Scripts>
+  </Frame>
+</Ui>

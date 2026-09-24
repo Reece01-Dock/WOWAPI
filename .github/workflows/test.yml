@@ -1,0 +1,40 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        lua: [lua5.1, luajit]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ${{ matrix.lua }}
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.lua }}
+      - name: Cache downloaded game art
+        uses: actions/cache@v4
+        with:
+          path: .wowtest/cache
+          key: wow-art-${{ hashFiles('wowapi/data/atlases.txt') }}
+      - name: Run specs
+        run: ${{ matrix.lua }} ./wowtest test
+      - name: Smoke-test every addon
+        run: |
+          mkdir -p screenshots
+          for d in addons/*/; do
+            name=$(basename "$d")
+            if [ "${{ matrix.lua }}" = "lua5.1" ]; then
+              ${{ matrix.lua }} ./wowtest check "$d" --screenshot "screenshots/$name.svg" || exit 1
+            else
+              ${{ matrix.lua }} ./wowtest check "$d" --no-art || exit 1
+            fi
+          done
+      - name: Upload UI screenshots
+        if: matrix.lua == 'lua5.1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots/

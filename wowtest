@@ -1,0 +1,531 @@
+#!/usr/bin/env lua
+-- wowtest: test WoW: Forever addons without launching the game.
+--
+--   ./wowtest test [paths...]        run *_spec.lua files (default: addons/ spec/)
+--   ./wowtest check <addon dir...>   load, log in, and report errors / missing API
+--   ./wowtest run <addon dir...>     interactive console: type /commands, fire events
+--   ./wowtest new <AddonName>        scaffold a new addon in addons/
+local scriptDir = (arg[0]:match("^(.*)[/\\][^/\\]*$")) or "."
+package.path = scriptDir .. "/?.lua;" .. scriptDir .. "/?/init.lua;" .. package.path
+
+local WoW = require("wowapi")
+local toc = require("wowapi.toc")
+
+local function usage()
+  print([[
+wowtest - WoW: Forever addon test harness (Interface ]] .. WoW.INTERFACE .. [[)
+
+Usage:
+  wowtest test [paths...] [-v] [-f pattern]   Run spec files (default: addons spec)
+  wowtest check <addon dir...> [--legacy] [--screenshot ui.svg|ui.png] [--outlines]
+                                              Smoke-test addons: load, login, report
+
+Art & data options (check / run):
+  --no-art         screenshots without game textures (no downloads)
+  --offline        only use art already cached or in --art-dir
+  --art-dir <dir>  a folder of extracted UI textures (PNG) to use first
+  --no-fake        API returns empty values instead of generated game data
+  wowtest run <addon dir...> [--name N] [--class C] [--level L]
+                                              Interactive console
+  wowtest new <AddonName>                     Create addons/<AddonName> from a template
+  wowtest install <owner/repo>... [--into dir] [--libs dir] [--require-signed] [--pubkey f.pub]
+                                              Fetch addons from GitHub and package them (resolve
+                                              .pkgmeta libraries) into .wowtest/AddOns; checks
+                                              author signatures and remembers their keys
+  wowtest index [AddOns dir] [--out dir]      Run every installed addon through the simulator
+                                              and write a compatibility index (JSON + HTML)
+
+Signed releases (tamper-proof downloads, not DRM):
+  wowtest compare <SimCheck.lua> [--import]   Compare the real client (SavedVariables from the
+                                              SimCheck addon) with the simulator; --import makes
+                                              the simulator use the real values
+
+  wowtest keygen [name] [--out dir]           Create an Ed25519 key pair (~/.config/wowtest/keys)
+  wowtest sign <dir>... [--key file.key]      Write wowtest.manifest + wowtest.sig for a release
+  wowtest verify <dir>... [--pubkey f.pub]    Check files match what the author signed
+]])
+end
+
+local function parseFlags(args)
+  local pos, flags = {}, {}
+  local i = 1
+  while i <= #args do
+    local a = args[i]
+    if a == "-v" or a == "--verbose" then flags.verbose = true
+    elseif a == "--legacy" then flags.legacy = true
+    elseif a == "-f" or a == "--filter" then flags.filter = args[i + 1]; i = i + 1
+    elseif a == "--art" or a == "--no-art" or a == "--outlines" or a == "--offline" or a == "--no-fake"
+      or a == "--require-signed" then
+      flags[a:sub(3)] = true
+    elseif a == "--import" and (args[i + 1] == nil or args[i + 1]:match("^%-%-")) then
+      flags[a:sub(3)] = true
+    elseif a:match("^%-%-") then flags[a:sub(3)] = args[i + 1]; i = i + 1
+    else pos[#pos + 1] = a end
+    i = i + 1
+  end
+  return pos, flags
+end
+
+local function isDir(p)
+  local ok = os.execute('test -d "' .. p .. '"')
+  return ok == true or ok == 0
+end
+
+local function findSpecs(paths)
+  local files = {}
+  for _, p in ipairs(paths) do
+    if p:match("%.lua$") then
+      files[#files + 1] = p
+    elseif isDir(p) then
+      local h = io.popen('find "' .. p .. '" -type f \\( -name "*_spec.lua" -o -name "*.spec.lua" \\) | sort')
+      for line in h:lines() do files[#files + 1] = line end
+      h:close()
+    end
+  end
+  return files
+end
+
+local function simFor(dirs, flags)
+  local player = {}
+  if flags.name then player.name = flags.name end
+  if flags.class then player.class = flags.class:upper() end
+  if flags.level then player.level = tonumber(flags.level) end
+  if flags.realm then player.realm = flags.realm end
+  local paths = {}
+  for _, d in ipairs(dirs) do paths[#paths + 1] = toc.dirname(d) end
+  return WoW.new({ player = player, addonPaths = paths, legacyGlobals = flags.legacy,
+    savedVariablesDir = flags.wtf, quiet = true, art = not flags["no-art"], offline = flags.offline,
+    artDir = flags["art-dir"], fakeData = not flags["no-fake"], artVerbose = true })
+end
+
+local commands = {}
+
+function commands.test(args)
+  local paths, flags = parseFlags(args)
+  if #paths == 0 then paths = { scriptDir .. "/addons", scriptDir .. "/spec" } end
+  local files = findSpecs(paths)
+  if #files == 0 then print("No spec files found in: " .. table.concat(paths, ", ")); return 1 end
+  local ok = require("wowapi.testing").run(files, flags)
+  return ok and 0 or 1
+end
+
+function commands.check(args)
+  local dirs, flags = parseFlags(args)
+  if #dirs == 0 then usage(); return 2 end
+  local sim = simFor(dirs, flags)
+  for _, d in ipairs(dirs) do
+    local ok, why = sim:LoadAddon(d)
+    if not ok then print("Failed to load " .. d .. ": " .. tostring(why)) end
+  end
+  sim:Login()
+  sim:Advance(tonumber(flags.seconds) or 5)
+  -- exercise every slash command the addon registered with no arguments
+  if flags.slash ~= "no" then
+    local list = sim:Get("SlashCmdList") or {}
+    local keys = {}
+    for k in pairs(list) do keys[#keys + 1] = k end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+      local alias = sim:Get("SLASH_" .. k .. "1")
+      if alias then print("Trying " .. alias); sim:Slash(alias) end
+    end
+  end
+  if flags.screenshot then
+    sim:Screenshot(flags.screenshot, { outlines = flags.outlines })
+    print("Screenshot written to " .. flags.screenshot)
+  end
+  sim:Logout()
+  if #sim.chat > 0 then
+    print("\nChat output:")
+    for _, l in ipairs(sim.chat) do print("  " .. l.text) end
+  end
+  print("\n" .. sim:Report())
+  return #sim.errors == 0 and 0 or 1
+end
+
+local function parseValue(s)
+  if s == "true" then return true elseif s == "false" then return false elseif s == "nil" then return nil end
+  local n = tonumber(s)
+  if n then return n end
+  return (s:gsub('^"(.*)"$', "%1"))
+end
+
+function commands.run(args)
+  local dirs, flags = parseFlags(args)
+  if #dirs == 0 then usage(); return 2 end
+  flags.wtf = flags.wtf or ".wowtest/WTF"
+  os.execute('mkdir -p "' .. flags.wtf .. '"')
+  local sim = simFor(dirs, flags)
+  sim.onChat = function(msg) print(WoW.StripCodes(msg)) end
+  local seenErrors = 0
+  local function flushErrors()
+    for i = seenErrors + 1, #sim.errors do print("\27[31mLua error: " .. sim.errors[i].traceback .. "\27[0m") end
+    seenErrors = #sim.errors
+  end
+  for _, d in ipairs(dirs) do
+    local ok, why = sim:LoadAddon(d)
+    if not ok then print("Failed to load " .. d .. ": " .. tostring(why)) end
+  end
+  sim:Login()
+  flushErrors()
+  print([[
+Logged in as ]] .. sim.player.name .. [[ (]] .. sim.player.class .. [[ ]] .. sim.player.level .. [[). Commands:
+  /anything            run a slash command          wait <sec>       advance game time
+  event NAME [args]    fire a game event            click <Frame>    click a named frame
+  = <expr>             evaluate Lua in the game     lua <code>       run Lua in the game
+  combat on|off        enter/leave combat           reload           /reload (saves variables)
+  target <name>        set a target                 report           errors, stubs, leaks
+  hover <Frame>        mouse over a frame           drag <F> <dx> <dy>  drag a frame
+  mouse <x> <y>        move the mouse               screenshot [file.svg]  render the UI
+  clickat <x> <y>|<F>  real click (what's on top)   key <KEY>        press a key, e.g. key CTRL-F
+  type <text>          type into focused edit box   menu [item]      show / pick from the open menu
+  quit                 log out and save SavedVariables to ]] .. flags.wtf)
+  while true do
+    io.write("> ")
+    io.flush()
+    local line = io.read("*l")
+    if not line or line == "quit" or line == "exit" then break end
+    line = line:gsub("^%s+", ""):gsub("%s+$", "")
+    local cmd, rest = line:match("^(%S+)%s*(.*)$")
+    if not cmd then
+      -- empty line
+    elseif cmd:sub(1, 1) == "/" then
+      sim:Slash(line)
+    elseif cmd == "event" then
+      local parts = {}
+      for w in rest:gmatch("%S+") do parts[#parts + 1] = w end
+      local name = table.remove(parts, 1)
+      local vals = {}
+      for i, p in ipairs(parts) do vals[i] = parseValue(p) end
+      sim:FireEvent(name, (table.unpack or unpack)(vals, 1, #parts))
+    elseif cmd == "wait" then
+      sim:Advance(tonumber(rest) or 1)
+    elseif cmd == "click" then
+      local f = sim:Get(rest)
+      if f then sim:Click(f) else print("No frame named " .. rest) end
+    elseif cmd == "=" then
+      local res = { sim:Exec("return " .. rest) }
+      if res[1] then
+        local out = {}
+        for i = 2, #res do out[#out + 1] = tostring(res[i]) end
+        print(#out > 0 and table.concat(out, ", ") or "nil")
+      end
+    elseif cmd == "lua" then
+      sim:Exec(rest)
+    elseif cmd == "combat" then
+      if rest == "off" then sim:LeaveCombat() else sim:EnterCombat() end
+    elseif cmd == "reload" then
+      sim:Reload()
+    elseif cmd == "target" then
+      sim:SetTarget(rest ~= "" and { name = rest, hostile = true } or nil)
+    elseif cmd == "screenshot" then
+      local path = rest ~= "" and rest or "screenshot.png"
+      local ok, err = pcall(sim.Screenshot, sim, path)
+      print(ok and ("Wrote " .. path) or tostring(err))
+    elseif cmd == "mouse" then
+      local x, y = rest:match("(%-?[%d.]+)%s+(%-?[%d.]+)")
+      local f = sim:MoveMouse(tonumber(x) or 0, tonumber(y) or 0)
+      print("Mouse over: " .. (f and (f:GetDebugName()) or "nothing"))
+    elseif cmd == "drag" then
+      local name, dx, dy = rest:match("(%S+)%s+(%-?[%d.]+)%s+(%-?[%d.]+)")
+      if name then sim:Drag(name, tonumber(dx), tonumber(dy)) else print("Usage: drag <Frame> <dx> <dy>") end
+    elseif cmd == "hover" then
+      sim:Hover(rest)
+    elseif cmd == "key" then
+      sim:PressKey(rest)
+    elseif cmd == "type" then
+      sim:TypeText(rest)
+    elseif cmd == "clickat" then
+      local x, y = rest:match("(%-?[%d.]+)%s+(%-?[%d.]+)")
+      local f = x and sim:ClickAt(tonumber(x), tonumber(y)) or (not x and sim:ClickAt(rest))
+      print("Clicked: " .. (f and f:GetDebugName() or "nothing"))
+    elseif cmd == "menu" then
+      if rest ~= "" then sim:ChooseMenuItem(rest)
+      else for _, e in ipairs(sim:MenuItems()) do print(string.rep("  ", e.depth) .. (e.selected and "(*) " or "") .. tostring(e.text or ("<" .. e.kind .. ">"))) end end
+    elseif cmd == "report" then
+      print(sim:Report())
+    else
+      print("Unknown command: " .. cmd)
+    end
+    flushErrors()
+  end
+  sim:Logout()
+  flushErrors()
+  print("SavedVariables written to " .. flags.wtf)
+  return 0
+end
+
+function commands.install(args)
+  local srcs, flags = parseFlags(args)
+  if #srcs == 0 then
+    print("Usage: wowtest install <owner/repo | git URL | folder>... [--into dir] [--libs dir]")
+    return 2
+  end
+  local pubkey
+  if flags.pubkey then
+    local f = io.open(flags.pubkey, "r")
+    if not f then print("No public key file at " .. flags.pubkey); return 2 end
+    pubkey = f:read("*a"); f:close()
+  end
+  local inst = require("wowapi.installer").new({ addonsDir = flags.into, libPaths = { flags.libs },
+    requireSigned = flags["require-signed"], pubkey = pubkey })
+  local all = {}
+  for _, src in ipairs(srcs) do
+    local ok, res = pcall(inst.install, inst, src)
+    if ok then
+      for _, name in ipairs(res) do all[#all + 1] = name end
+      print("Installed " .. src .. ": " .. table.concat(res, ", "))
+    else
+      print("Failed " .. src .. ": " .. tostring(res))
+    end
+  end
+  for _, r in ipairs(inst.report.resolved) do print(string.format("  lib %-45s %s", r.addon .. ": " .. r.lib, r.how)) end
+  for _, m in ipairs(inst.report.missing) do print(string.format("  MISSING %s: %s (%s)", m.addon, m.lib, tostring(m.url))) end
+  local signing = require("wowapi.signing")
+  for _, sg in ipairs(inst.report.signatures) do
+    print(string.format("  signature %-30s %s", sg.addon, signing.describe(sg.result)))
+    if sg.result.status == "valid" and #inst.report.resolved > 0 then
+      print("    (libraries fetched while packaging are not covered by the author's signature)")
+    end
+  end
+  print("\nAddOns folder: " .. inst.addonsDir .. "\nTry: ./wowtest check " .. inst.addonsDir .. "/" .. (all[1] or "<Addon>"))
+  return #inst.report.missing == 0 and 0 or 1
+end
+
+local LUA = arg[-1] or "lua"
+
+-- (internal) check one addon and write its record: wowtest _index1 <dir> <out>
+commands._index1 = function(args)
+  local rec = require("wowapi.index").check(args[1])
+  local f = assert(io.open(args[2], "w"))
+  f:write("return " .. require("wowapi.serialize").serialize(rec))
+  f:close()
+  return 0
+end
+
+function commands.index(args)
+  local pos, flags = parseFlags(args)
+  local root = pos[1] or ".wowtest/AddOns"
+  local out = flags.out or ".wowtest/index"
+  local timeoutSec = tonumber(flags.timeout) or 120
+  local idx = require("wowapi.index")
+  local dirs = {}
+  local p = io.popen('ls -1 "' .. root .. '" 2>/dev/null')
+  for n in p:lines() do
+    if toc.findToc(root .. "/" .. n) then dirs[#dirs + 1] = n end
+  end
+  p:close()
+  table.sort(dirs, function(a, b) return a:lower() < b:lower() end)
+  if #dirs == 0 then print("No addons in " .. root .. " (install some with: ./wowtest install owner/repo)"); return 2 end
+  local sigs = {}
+  local sf = loadfile(".wowtest/signatures.lua")
+  if sf then local ok, t = pcall(sf); if ok and type(t) == "table" then sigs = t end end
+  local hasTimeout = os.execute("command -v timeout >/dev/null 2>&1")
+  hasTimeout = hasTimeout == true or hasTimeout == 0
+  os.execute('mkdir -p "' .. out .. '"')
+  local addons = {}
+  for i, name in ipairs(dirs) do
+    io.write(string.format("[%d/%d] %-34s ", i, #dirs, name)); io.flush()
+    local tmp = os.tmpname()
+    local cmd = string.format('%s"%s" "%s" _index1 "%s" "%s" >/dev/null 2>&1',
+      hasTimeout and ("timeout " .. timeoutSec .. " ") or "", LUA, arg[0], root .. "/" .. name, tmp)
+    local r, _, c = os.execute(cmd)
+    local code = type(r) == "number" and math.floor(r / 256) or c
+    local chunk = loadfile(tmp)
+    local rec = chunk and select(2, pcall(chunk))
+    if type(rec) ~= "table" then
+      local timedOut = hasTimeout and code == 124
+      rec = { name = name, status = timedOut and "timeout" or "crash", errors = 0,
+        reason = timedOut and ("still running after " .. timeoutSec .. "s (an endless loop?)") or "the check itself failed" }
+    end
+    os.remove(tmp)
+    rec.signature = sigs[name] or { status = "unsigned" }
+    addons[#addons + 1] = rec
+    print(idx.STATUS[rec.status] .. (rec.errors > 0 and (" (" .. rec.errors .. " errors)") or ""))
+  end
+  local index = { interface = WoW.INTERFACE, generated = os.date("!%Y-%m-%d %H:%M UTC"), addons = addons }
+  local jf = assert(io.open(out .. "/index.json", "w")); jf:write(idx.json(index)); jf:close()
+  local hf = assert(io.open(out .. "/index.html", "w")); hf:write(idx.html(index)); hf:close()
+  print("\nWrote " .. out .. "/index.json and " .. out .. "/index.html")
+  return 0
+end
+
+function commands.compare(args)
+  local pos, flags = parseFlags(args)
+  local path = pos[1]
+  if not path then
+    print("Usage: wowtest compare <.../WTF/Account/<ACCOUNT>/SavedVariables/SimCheck.lua> [--out report.md] [--import]")
+    print("Install addons/SimCheck in the game, log in, type /simcheck, then /reload or log out to save.")
+    return 2
+  end
+  local cal = require("wowapi.calibrate")
+  local real, err = cal.loadSaved(path)
+  if not real then print(err); return 1 end
+  local ok, simr, sim = pcall(cal.runInSim, scriptDir .. "/addons/SimCheck")
+  if not ok then print(simr); return 1 end
+  local sections = cal.compare(real, simr, sim)
+  local c = real.client or {}
+  print(string.format("Real client: %s build %s, interface %s, game type %s, WOW_PROJECT_ID %s",
+    tostring(c.version), tostring(c.build), tostring(c.interface), table.concat(c.gameTypes or {}, "/"), tostring(c.projectId)))
+  local total = 0
+  for _, s in ipairs(sections) do
+    total = total + s.count
+    print(string.format("\n%s: %s", s.title, s.count == 0 and "matches" or (s.count .. " difference(s)")))
+    if s.note then print("  (" .. s.note .. ")") end
+    for i, r in ipairs(s.rows) do
+      if i > 12 then print(string.format("  ... %d more in the report", #s.rows - 12)); break end
+      print("  - " .. r)
+    end
+  end
+  local out = flags.out or ".wowtest/compare/report.md"
+  os.execute('mkdir -p "' .. (out:match("^(.*)/[^/]+$") or ".") .. '"')
+  local f = assert(io.open(out, "w")); f:write(cal.markdown(sections, real)); f:close()
+  print("\nFull report: " .. out)
+  if flags.import then
+    local target = flags.import ~= true and flags.import or (scriptDir .. "/" .. cal.IMPORT_PATH)
+    cal.writeImport(real, target)
+    print("Imported the real client's facts into " .. target .. " (commit it; every sim now uses them).")
+  elseif total > 0 then
+    print("Run again with --import to make the simulator use the real client's values.")
+  end
+  return 0
+end
+
+local function keyDir() return (os.getenv("HOME") or ".") .. "/.config/wowtest/keys" end
+
+function commands.keygen(args)
+  local pos, flags = parseFlags(args)
+  local name = pos[1] or "author"
+  local signing = require("wowapi.signing")
+  local ok, key, pub, fp = pcall(signing.keygen, flags.out or keyDir(), name)
+  if not ok then print("keygen: " .. tostring(key)); return 1 end
+  print("Private key: " .. key .. "   (keep it secret and backed up; never commit it)")
+  print("Public key:  " .. pub .. "   (publish this, e.g. in your README or releases)")
+  print("Fingerprint: " .. fp)
+  print("\nSign an addon with: ./wowtest sign <addon dir> --key " .. key)
+  return 0
+end
+
+function commands.sign(args)
+  local dirs, flags = parseFlags(args)
+  local key = flags.key or (keyDir() .. "/author.key")
+  if #dirs == 0 then print("Usage: wowtest sign <addon or repo dir>... [--key file.key]"); return 2 end
+  local signing = require("wowapi.signing")
+  for _, d in ipairs(dirs) do
+    local untracked = signing.untracked(d)
+    if #untracked > 0 then
+      print("Warning: " .. d .. " has files that aren't committed; they are NOT signed (commit them first):")
+      for i = 1, math.min(#untracked, 10) do print("  " .. untracked[i]) end
+    end
+    local ok, res = pcall(signing.sign, d, key)
+    if not ok then print("sign: " .. tostring(res)); return 1 end
+    print(string.format("Signed %s: %d files, key %s", d, res.files, res.fingerprint))
+  end
+  print("Commit " .. signing.MANIFEST .. " and " .. signing.SIGNATURE .. " with the release.")
+  return 0
+end
+
+function commands.verify(args)
+  local dirs, flags = parseFlags(args)
+  if #dirs == 0 then print("Usage: wowtest verify <addon dir>... [--pubkey author.pub]"); return 2 end
+  local signing = require("wowapi.signing")
+  local pubkey
+  if flags.pubkey then
+    local f = io.open(flags.pubkey, "r")
+    if not f then print("No public key file at " .. flags.pubkey); return 2 end
+    pubkey = f:read("*a"); f:close()
+  end
+  local worst = 0
+  for _, d in ipairs(dirs) do
+    local ok, res = pcall(signing.verify, d, { pubkey = pubkey })
+    if not ok then print(d .. ": " .. tostring(res)); worst = 1
+    else
+      print(string.format("%s: %s", d, signing.describe(res)))
+      for _, f in ipairs(res.modified) do print("  modified: " .. f) end
+      for _, f in ipairs(res.missing) do print("  missing:  " .. f) end
+      for _, f in ipairs(res.extra) do print("  unsigned: " .. f) end
+      if res.status == "invalid" then worst = 1 elseif res.status == "unsigned" and worst == 0 then worst = 3 end
+    end
+  end
+  return worst
+end
+
+function commands.new(args)
+  local name = args[1]
+  if not name or not name:match("^[%a_][%w_]*$") then print("Usage: wowtest new <AddonName>  (letters, digits, _)"); return 2 end
+  local dir = scriptDir .. "/addons/" .. name
+  if isDir(dir) then print(dir .. " already exists"); return 1 end
+  local slash = name:lower()
+  os.execute('mkdir -p "' .. dir .. '/tests"')
+  local files = {
+    [name .. ".toc"] = table.concat({
+      "## Interface: " .. WoW.INTERFACE,
+      "## Title: " .. name,
+      "## Notes: Describe your addon here",
+      "## Author: You",
+      "## Version: 0.1.0",
+      "## SavedVariables: " .. name .. "DB",
+      "",
+      "Core.lua",
+      "",
+    }, "\n"),
+    ["Core.lua"] = [[
+local addonName, ns = ...
+
+local defaults = { enabled = true }
+
+local frame = CreateFrame("Frame")
+frame:RegisterEvent("ADDON_LOADED")
+frame:RegisterEvent("PLAYER_LOGIN")
+frame:SetScript("OnEvent", function(self, event, arg1)
+  if event == "ADDON_LOADED" and arg1 == addonName then
+    {{DB}} = {{DB}} or CopyTable(defaults)
+    ns.db = {{DB}}
+  elseif event == "PLAYER_LOGIN" then
+    print("|cff33ff99" .. addonName .. "|r loaded. Type /{{CMD}}")
+  end
+end)
+
+SLASH_{{KEY}}1 = "/{{CMD}}"
+SlashCmdList["{{KEY}}"] = function(msg)
+  msg = strtrim(msg or ""):lower()
+  if msg == "toggle" then
+    ns.db.enabled = not ns.db.enabled
+    print(addonName .. " is now " .. (ns.db.enabled and "enabled" or "disabled"))
+  else
+    print("Usage: /{{CMD}} toggle")
+  end
+end
+]],
+    ["tests/" .. name .. "_spec.lua"] = [[
+describe("{{NAME}}", function()
+  it("loads without errors and greets on login", function()
+    local sim = Boot()
+    expect(sim:ChatContains("{{NAME}}", true)).to_be(true)
+  end)
+
+  it("toggles and remembers the setting across /reload", function()
+    local sim = Boot()
+    sim:Slash("/{{CMD}} toggle")
+    expect(sim:LastChat()).to_match("disabled")
+    sim:Reload()
+    expect(sim:Get("{{DB}}").enabled).to_be(false)
+  end)
+end)
+]],
+  }
+  local vars = { DB = name .. "DB", KEY = name:upper(), CMD = slash, NAME = name }
+  for f, content in pairs(files) do
+    content = content:gsub("{{(%u+)}}", vars)
+    local h = assert(io.open(dir .. "/" .. f, "w"))
+    h:write(content)
+    h:close()
+  end
+  print("Created " .. dir)
+  print("Run its tests with: ./wowtest test " .. dir)
+  return 0
+end
+
+local cmd = table.remove(arg, 1)
+if not cmd or not commands[cmd] then usage(); os.exit(cmd and 2 or 0) end
+os.exit(commands[cmd](arg))
