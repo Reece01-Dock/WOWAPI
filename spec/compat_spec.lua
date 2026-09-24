@@ -169,3 +169,84 @@ ignore:
     os.execute('rm -rf "' .. root .. '"')
   end)
 end)
+
+describe("more behaviours from real addons", function()
+  it("a TOPLEFT + RIGHT anchored row keeps its own height (AceGUI)", function()
+    local sim = newSim()
+    local _, h = sim:Exec([[
+      local p = CreateFrame("Frame", nil, UIParent); p:SetPoint("TOPLEFT", 0, 0); p:SetSize(400, 300)
+      local row = CreateFrame("Frame", nil, p); row:SetHeight(24)
+      row:SetPoint("TOPLEFT", p, "TOPLEFT", 0, -100); row:SetPoint("RIGHT", p)
+      return row:GetHeight(), select(4, row:GetRect())
+    ]])
+    expect(h).to_be(24)
+  end)
+
+  it("font strings with a width wrap and report their real height", function()
+    local sim = newSim()
+    local _, one, many, lines = sim:Exec([[
+      local fs = UIParent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+      fs:SetPoint("TOPLEFT"); fs:SetWidth(120); fs:SetText("short")
+      local one = fs:GetStringHeight()
+      fs:SetText(("word "):rep(40))
+      return one, fs:GetStringHeight(), fs:GetNumLines()
+    ]])
+    expect(lines > 1).to_be(true)
+    expect(many > one).to_be(true)
+  end)
+
+  it("secure snippets can use ...", function()
+    local sim = newSim()
+    local _, frame = sim:Exec([[return CreateFrame("Frame", "SnipFrame", UIParent)]])
+    local r = require("wowapi.secure").runSnippet(sim, frame, "local x, y = ...; return x + y", "self, ...", 2, 3)
+    expect(r).to_be(5)
+    expect(#sim.errors).to_be(0)
+  end)
+
+  it("hooks Blizzard mixin methods the simulator only knows by name", function()
+    local sim = newSim()
+    sim:Exec('hooksecurefunc(ActionBarActionButtonMixin, "UpdateUsable", function() end)')
+    expect(#sim.errors).to_be(0)
+  end)
+
+  it("lists installed addons that aren't loaded yet and loads them by index", function()
+    local sim = newSim({ addonPaths = { "spec/fixtures" } })
+    local _, n, name, loaded = sim:Exec([[
+      local n = C_AddOns.GetNumAddOns()
+      for i = 1, n do
+        local name = C_AddOns.GetAddOnInfo(i)
+        if name == "LibThing" then return n, name, (C_AddOns.LoadAddOn(i)) end
+      end
+      return n
+    ]])
+    expect(n >= 4).to_be(true)
+    expect(name).to_be("LibThing")
+    expect(loaded).to_be(true)
+  end)
+
+  it("resolves addon file paths case-insensitively", function()
+    local toc = require("wowapi.toc")
+    expect(toc.resolve("spec/FIXTURES/xmladdon/XmlAddon.toc")).to_be("spec/fixtures/XmlAddon/XmlAddon.toc")
+  end)
+
+  it("Settings.OpenToCategory shows the Settings window with the category", function()
+    local sim = newSim()
+    sim:Exec([[
+      SVTestDB = { flag = true }
+      local cat = Settings.RegisterVerticalLayoutCategory("TestAddon")
+      local s = Settings.RegisterAddOnSetting(cat, "TestAddon_Flag", "flag", SVTestDB, "boolean", "A flag", false)
+      Settings.CreateCheckbox(cat, s, "tooltip")
+      Settings.RegisterAddOnCategory(cat)
+      Settings.OpenToCategory(cat:GetID())
+    ]])
+    expect(sim.settingsPanel:IsShown()).to_be(true)
+    local svg = sim:Screenshot()
+    expect(svg:find("A flag", 1, true) ~= nil).to_be(true)
+  end)
+
+  it("GetCVar and friends are globals, and unknown CVars return nil", function()
+    local sim = newSim()
+    local _, n = sim:Exec("return select('#', GetCVar('noSuchCVar'))")
+    expect(n).to_be(1)
+  end)
+end)

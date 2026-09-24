@@ -672,6 +672,7 @@ function M.loadFile(sim, path, addon, runLua)
       end
     elseif node.tag == "Include" then
       local f = node.attrs.file and toc.join(ctx.dir, (node.attrs.file:gsub("\\", "/")))
+      f = f and (toc.resolve(f) or f)
       if f and f:lower():match("%.lua$") then runLua(f)
       elseif f then M.loadFile(sim, f, addon, runLua) end
     elseif node.tag == "Font" then

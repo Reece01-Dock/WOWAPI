@@ -19,6 +19,32 @@ function M.exists(path)
   return false
 end
 
+-- WoW reads addon files case-insensitively (Windows); find `path` on a
+-- case-sensitive disk by matching each missing component ignoring case.
+function M.resolve(path)
+  if M.exists(path) then return path end
+  local abs = path:sub(1, 1) == "/"
+  local cur = abs and "" or "."
+  local parts = {}
+  for part in path:gmatch("[^/\\]+") do parts[#parts + 1] = part end
+  for i, part in ipairs(parts) do
+    local cand = (cur == "" and "/" or cur .. "/") .. part
+    if part == "." or part == ".." or M.exists(cand) then
+      cur = cand
+    else
+      local found
+      local p = io.popen('ls -1a "' .. (cur == "" and "/" or cur) .. '" 2>/dev/null')
+      if p then
+        for n in p:lines() do if n:lower() == part:lower() then found = n; break end end
+        p:close()
+      end
+      if not found then return nil end
+      cur = (cur == "" and "/" or cur .. "/") .. found
+    end
+    if i == #parts then return abs and cur or cur:gsub("^%./", "") end
+  end
+end
+
 function M.readFile(path)
   local f, err = io.open(path, "rb")
   if not f then return nil, err end

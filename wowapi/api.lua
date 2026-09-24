@@ -85,6 +85,13 @@ function M.install(sim, env)
     rawset(env, k, _G[k])
   end
   rawset(env, "unpack", unpack)
+  -- a Blizzard placeholder frame answers unknown keys through a fallback;
+  -- addons still see the widget's real metatable, as in the client
+  rawset(env, "getmetatable", function(o)
+    local st = sim.widgetState[o]
+    if st and st.baseMeta then return st.baseMeta end
+    return getmetatable(o)
+  end)
   rawset(env, "newproxy", rawget(_G, "newproxy") or function(mt)
     local p = {}
     if mt then setmetatable(p, {}) end
@@ -198,6 +205,51 @@ function M.install(sim, env)
     return c
   end
   rawset(env, "CopyTable", CopyTable)
+  -- more of SharedXML's TableUtil
+  rawset(env, "GetOrCreateTableEntry", function(t, k, default)
+    local v = t[k]
+    if v == nil then v = default or {}; t[k] = v end
+    return v
+  end)
+  rawset(env, "FindInTable", function(t, v) for k, x in pairs(t) do if x == v then return k end end end)
+  rawset(env, "MergeTable", function(dest, src) for k, v in pairs(src or {}) do dest[k] = v end return dest end)
+  rawset(env, "FindInTableIf", function(t, pred) for k, v in pairs(t) do if pred(v) then return k, v end end end)
+  rawset(env, "ContainsIf", function(t, pred) for _, v in pairs(t) do if pred(v) then return true end end return false end)
+  -- TooltipDataProcessor: addons post-hook tooltip data by type
+  local postCalls = {}
+  rawset(env, "TooltipDataProcessor", {
+    AllTypes = "ALL",
+    AddTooltipPostCall = function(kind, fn) postCalls[kind] = postCalls[kind] or {}; table.insert(postCalls[kind], fn) end,
+    AddTooltipPreCall = function() end,
+    AddLinePreCall = function() end,
+    AddLinePostCall = function() end,
+    _postCalls = postCalls,
+  })
+  rawset(env, "GetAutoCompleteRealms", function() return { (sim.player.realm or ""):gsub("[%s%-]", "") } end)
+  rawset(env, "GetKeysArray", function(t) local o = {}; for k in pairs(t) do o[#o + 1] = k end return o end)
+  rawset(env, "GetValuesArray", function(t) local o = {}; for _, v in pairs(t) do o[#o + 1] = v end return o end)
+  rawset(env, "GetPairsArray", function(t) local o = {}; for k, v in pairs(t) do o[#o + 1] = { key = k, value = v } end return o end)
+  rawset(env, "GetKeysArraySortedByValue", function(t)
+    local o = {}; for k in pairs(t) do o[#o + 1] = k end
+    table.sort(o, function(a, b) return t[a] < t[b] end)
+    return o
+  end)
+  rawset(env, "tCompare", function(a, b, depth)
+    local function eq(x, y, d)
+      if type(x) ~= "table" or type(y) ~= "table" then return x == y end
+      if d and d <= 0 then return true end
+      for k, v in pairs(x) do if not eq(v, y[k], d and d - 1) then return false end end
+      for k in pairs(y) do if x[k] == nil then return false end end
+      return true
+    end
+    return eq(a, b, depth)
+  end)
+  rawset(env, "tUnorderedRemove", function(t, i) t[i] = t[#t]; t[#t] = nil end)
+  rawset(env, "tDeleteItem", function(t, v)
+    local n = 0
+    for i = #t, 1, -1 do if t[i] == v then table.remove(t, i); n = n + 1 end end
+    return n
+  end)
   rawset(env, "MergeTable", function(dst, src) for k, v in pairs(src) do dst[k] = v end return dst end)
 
   -- math (WoW's global trig functions take degrees)
@@ -273,11 +325,35 @@ function M.install(sim, env)
   rawset(env, "securecallfunction", function(fn, ...) return env.securecall(fn, ...) end)
   rawset(env, "secureexecuterange", function(t, fn, ...) for k, v in pairs(t) do env.securecall(fn, k, v, ...) end end)
   rawset(env, "issecure", function() return false end)
-  rawset(env, "issecurevariable", function() return true, nil end)
+  -- addon code taints what it writes: a table field or a global an addon
+  -- created reports that addon (TaintLess finds its host addon this way)
+  rawset(env, "issecurevariable", function(t, k)
+    if k == nil then t, k = env, t end
+    if t == env then
+      local by = sim.createdGlobals and sim.createdGlobals[k]
+      if by then return false, by end
+      return true, nil
+    end
+    if sim.currentAddon then return false, sim.currentAddon end
+    return true, nil
+  end)
   rawset(env, "InCombatLockdown", function() return sim.lockdown end)
   rawset(env, "hooksecurefunc", function(tbl, name, hook)
     if type(tbl) == "string" then tbl, name, hook = env, tbl, name end
     local orig = tbl[name]
+    if type(orig) ~= "function" then
+      -- a Blizzard method the simulator only knows by its owner (a mixin or
+      -- placeholder frame): hook a no-op, as the real one would exist
+      local st = sim.widgetState[tbl]
+      -- (also a widget method this simulator doesn't implement, e.g. a
+      -- GameTooltip:SetQuestItem an addon hooks)
+      local isStub = sim.blizzardTables[tbl] or (st and st.placeholder)
+        or (st and type(name) == "string" and require("wowapi.resources").looksLikeMethod(name))
+      local ost = type(orig) == "table" and sim.widgetState[orig]
+      if isStub and (orig == nil or (ost and ost.autoChild)) then
+        orig = function() end
+      end
+    end
     if type(orig) ~= "function" then
       error("hooksecurefunc(): " .. tostring(name) .. " is not a function", 2)
     end
@@ -339,6 +415,7 @@ function M.install(sim, env)
     local v = sim.cvars[n]
     if v == nil and sim.cvarDefaults then v = sim.cvarDefaults[n] end
     if v ~= nil then return tostring(v) end
+    return nil
   end
   local cvar = {
     GetCVar = cvarGet,
@@ -365,6 +442,10 @@ function M.install(sim, env)
     end,
   }
   rawset(env, "C_CVar", cvar)
+  -- SharedXML's CvarUtil exposes these as globals in the mainline client
+  for _, n in ipairs({ "GetCVar", "SetCVar", "GetCVarBool", "GetCVarDefault", "RegisterCVar", "GetCVarInfo" }) do
+    rawset(env, n, cvar[n])
+  end
 
   ------------------------------------------------------------ mixins & colors
   local function Mixin(obj, ...)
@@ -413,6 +494,8 @@ function M.install(sim, env)
     GREEN_FONT_COLOR = { 0.1, 1, 0.1 }, GRAY_FONT_COLOR = { 0.5, 0.5, 0.5 }, YELLOW_FONT_COLOR = { 1, 1, 0 },
     WHITE_FONT_COLOR = { 1, 1, 1 }, ORANGE_FONT_COLOR = { 1, 0.5, 0.25 }, DISABLED_FONT_COLOR = { 0.5, 0.5, 0.5 },
     LIGHTBLUE_FONT_COLOR = { 0.53, 0.67, 1 }, BLUE_FONT_COLOR = { 0, 0.67, 1 },
+    LIGHTGRAY_FONT_COLOR = { 0.749, 0.749, 0.749 }, DARKGRAY_FONT_COLOR = { 0.4, 0.4, 0.4 },
+    LIGHTYELLOW_FONT_COLOR = { 1, 1, 0.6 }, DARKYELLOW_FONT_COLOR = { 1, 0.82, 0 },
   }) do rawset(env, name, CreateColor(c[1], c[2], c[3], 1)) end
 
   local raidColors, sortOrder, maleNames = {}, {}, {}
@@ -504,7 +587,14 @@ function M.install(sim, env)
       return x.name, nil
     end,
     UnitNameUnmodified = function(u) return env.UnitName(u) end,
-    UnitFullName = function(u) local x = U(u); if x then return x.name, x.realm end end,
+    UnitFullName = function(u)
+      local x = U(u)
+      if not x then return end
+      -- the player's own realm comes back normalized (no spaces or dashes)
+      local realm = x.realm or (x == sim.player and sim.player.realm) or nil
+      if realm then realm = realm:gsub("[%s%-]", "") end
+      return x.name, realm
+    end,
     UnitGUID = function(u) local x = U(u); return x and x.guid end,
     UnitClass = function(u) local x = U(u); if x then return classOf(x) end end,
     UnitClassBase = function(u) local x = U(u); if x then local _, f, id = classOf(x); return f, id end end,
@@ -804,6 +894,7 @@ function M.install(sim, env)
     UseContainerItem = function(bag, slot) table.insert(sim.sentChat, { used = { bag, slot } }) end,
   })
   rawset(env, "NUM_BAG_SLOTS", 4)
+  rawset(env, "NUM_CONTAINER_FRAMES", 13)
   rawset(env, "BACKPACK_CONTAINER", 0)
 
   ------------------------------------------------------------ spellbook
@@ -903,15 +994,9 @@ function M.install(sim, env)
   })
 
   ------------------------------------------------------------ addons
-  local function addonByRef(ref)
-    if type(ref) == "number" then
-      local name = sim.addonOrder[ref]
-      return name and sim.addons[name]
-    end
-    return sim.addons[ref]
-  end
+  local function addonByRef(ref) return sim:_addonInfo(ref) end
   local addonsApi = {
-    GetNumAddOns = function() return #sim.addonOrder end,
+    GetNumAddOns = function() return #sim:_installedAddons() end,
     GetAddOnMetadata = function(ref, field)
       local a = addonByRef(ref)
       if not a then error("Couldn't find addon " .. tostring(ref), 2) end
@@ -920,15 +1005,19 @@ function M.install(sim, env)
     GetAddOnInfo = function(ref)
       local a = addonByRef(ref)
       if not a then return nil, nil, nil, false, "MISSING" end
-      return a.name, a.toc.title, a.toc.metadata.notes, true, a.loaded and nil or a.reason, "INSECURE", false
+      local reason = a.reason
+      if not a.loaded and not reason and a.toc.loadOnDemand then reason = "DEMAND_LOADED" end
+      return a.name, a.toc.title, a.toc.metadata.notes, reason == nil or reason == "DEMAND_LOADED", a.loaded and nil or reason, "INSECURE", false
     end,
     IsAddOnLoaded = function(ref)
       local a = addonByRef(ref)
       if not a then return false, false end
-      return a.loaded or a.loading, a.loaded
+      return (a.loaded or a.loading) and true or false, a.loaded and true or false
     end,
     LoadAddOn = function(ref)
-      local ok, reason = sim:LoadAddon(ref)
+      local a = addonByRef(ref)
+      if a and a.loaded then return true end
+      local ok, reason = sim:LoadAddon(a and (a.dir or a.name) or ref)
       if ok then return true end
       return false, reason
     end,
@@ -1204,6 +1293,22 @@ function M.install(sim, env)
     category.settings[variable] = setting
     return setting
   end
+  -- a control in a vertical-layout category (drawn by wowapi.settingspanel)
+  local function control(category, kind, setting, options, tooltip)
+    local c = { kind = kind, setting = setting, options = options, tooltip = tooltip }
+    function c:AddShownPredicate() end
+    function c:AddModifyPredicate() end
+    function c:SetParentInitializer() end
+    function c:GetSetting() return self.setting end
+    if type(category) == "table" then
+      category.controls = category.controls or {}
+      table.insert(category.controls, c)
+    end
+    return c
+  end
+  rawset(env, "CreateSettingsListSectionHeaderInitializer", function(name)
+    return { kind = "header", name = name }
+  end)
   rawset(env, "Settings", {
     VarType = { Boolean = "boolean", Number = "number", String = "string" },
     RegisterCanvasLayoutCategory = function(frame_, name)
@@ -1218,7 +1323,13 @@ function M.install(sim, env)
     RegisterVerticalLayoutCategory = function(name)
       local c = newCategory(name)
       local layout = { initializers = {} }
-      function layout:AddInitializer(i) table.insert(self.initializers, i) end
+      function layout:AddInitializer(i)
+        table.insert(self.initializers, i)
+        if type(i) == "table" and i.kind == "header" then
+          c.controls = c.controls or {}
+          table.insert(c.controls, i)
+        end
+      end
       return c, layout
     end,
     RegisterVerticalLayoutSubcategory = function(parent, name)
@@ -1229,10 +1340,16 @@ function M.install(sim, env)
     RegisterAddOnCategory = function(cat) table.insert(sim.settingsCategories, cat) end,
     OpenToCategory = function(id)
       sim.openedSettingsCategory = id
-      for _, c in ipairs(sim.settingsCategories) do
-        if c.ID == id and c.frame then c.frame:Show() end
+      local function find(list)
+        for _, c in ipairs(list) do
+          if type(c) == "table" and (c == id or c.ID == id or c.name == id) then return c end
+          local sub = type(c) == "table" and c.subcategories and find(c.subcategories)
+          if sub then return sub end
+        end
       end
-      return true
+      local cat = find(sim.settingsCategories)
+      require("wowapi.settingspanel").open(sim, cat)
+      return cat ~= nil
     end,
     GetCategory = function(id) for _, c in ipairs(sim.settingsCategories) do if c.ID == id then return c end end end,
     RegisterAddOnSetting = function(category, variable, key, tbl, vtype, name, default)
@@ -1242,10 +1359,10 @@ function M.install(sim, env)
       local proxy = setmetatable({}, { __index = function() return getter() end, __newindex = function(_, _, v) setter(v) end })
       return newSetting(category, variable, proxy, "v", vtype, name, default)
     end,
-    CreateCheckbox = function(category, setting, tooltip) return { setting = setting, tooltip = tooltip } end,
-    CreateCheckBox = function(category, setting, tooltip) return { setting = setting, tooltip = tooltip } end,
-    CreateSlider = function(category, setting, options, tooltip) return { setting = setting, options = options, tooltip = tooltip } end,
-    CreateDropdown = function(category, setting, options, tooltip) return { setting = setting, options = options, tooltip = tooltip } end,
+    CreateCheckbox = function(category, setting, tooltip) return control(category, "checkbox", setting, nil, tooltip) end,
+    CreateCheckBox = function(category, setting, tooltip) return control(category, "checkbox", setting, nil, tooltip) end,
+    CreateSlider = function(category, setting, options, tooltip) return control(category, "slider", setting, options, tooltip) end,
+    CreateDropdown = function(category, setting, options, tooltip) return control(category, "dropdown", setting, options, tooltip) end,
     CreateSliderOptions = function(lo, hi, step)
       local o = { minValue = lo, maxValue = hi, steps = step }
       function o:SetLabelFormatter(kind, fn) self.formatter = fn end
@@ -1271,9 +1388,6 @@ function M.install(sim, env)
     rawset(env, "GetNumAddOns", addonsApi.GetNumAddOns)
     rawset(env, "GetAddOnInfo", addonsApi.GetAddOnInfo)
     rawset(env, "GetItemInfo", GetItemInfo)
-    rawset(env, "GetCVar", cvar.GetCVar)
-    rawset(env, "SetCVar", cvar.SetCVar)
-    rawset(env, "GetCVarBool", cvar.GetCVarBool)
     rawset(env, "GetSpellInfo", function(ref)
       local s = spellRef(ref); if not s then return nil end
       return s.name, nil, s.icon or 136243, s.castTime or 0, s.minRange or 0, s.maxRange or 0, s.id

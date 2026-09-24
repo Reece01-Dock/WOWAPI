@@ -73,9 +73,14 @@ end
 local function gitClone(url, dest, ref)
   local cmd = "git clone --quiet --depth 1 --recurse-submodules --shallow-submodules "
     .. (ref and ("--branch " .. q(ref) .. " ") or "") .. q(url) .. " " .. q(dest)
-  if sh(cmd) then return true end
-  if ref then return sh("git clone --quiet --depth 1 " .. q(url) .. " " .. q(dest)) end
-  return false
+  local ok = sh(cmd) or (ref and sh("git clone --quiet --depth 1 " .. q(url) .. " " .. q(dest)))
+  if not ok and isDir(dest .. "/.git") then ok = true end
+  -- a shallow submodule fetch misses pinned commits that aren't a branch
+  -- tip; fetch those submodules in full
+  if ok and exists(dest .. "/.gitmodules") then
+    sh("git -C " .. q(dest) .. " submodule update --init --recursive --quiet")
+  end
+  return ok and true or false
 end
 
 -- Download a directory tree served over HTTP (how svn repos present themselves).
@@ -197,19 +202,34 @@ function M:ace3()
 end
 
 -- Folders named `name` in installed addons / sources / extra lib paths.
+-- A library's LibStub minor version (`X_MINOR = n` or NewLibrary(MAJOR, n)).
+local function minorOf(dir, name)
+  local f = io.open(dir .. "/" .. name .. ".lua", "r")
+  if not f then return 0 end
+  local src = f:read(8192) or ""
+  f:close()
+  local n = src:match("MINOR%s*=%s*(%d+)") or src:match("NewLibrary%s*%(?%s*[^,]+,%s*(%d+)")
+  return tonumber(n) or 0
+end
+
+-- The newest copy of a library among installed addons and sources (the
+-- packager always embeds the latest release, so an old copy is never right).
 function M:findLibrary(name, exclude)
   local roots = { self.addonsDir, self.srcDir }
   for _, p in ipairs(self.libPaths) do roots[#roots + 1] = p end
+  local best, bestMinor
   for _, r in ipairs(roots) do
     for _, found in ipairs(lines("find " .. q(r) .. " -maxdepth 6 -type d -iname " .. q(name))) do
       if (not exclude or found:sub(1, #exclude) ~= exclude) then
         -- must contain some Lua or XML
         if #lines("find " .. q(found) .. " -maxdepth 2 \\( -name '*.lua' -o -name '*.xml' \\) | head -1") > 0 then
-          return found
+          local m = minorOf(found, name)
+          if not best or m > bestMinor then best, bestMinor = found, m end
         end
       end
     end
   end
+  return best
 end
 
 function M:resolveExternal(target, spec, workDir)

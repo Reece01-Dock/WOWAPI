@@ -285,20 +285,33 @@ be read and written on disk.
   (override with `projectId`), and 12.x secret-value restrictions are opt-in (`secretValues = true`).
 - **Game data is invented**, apart from the real facts built in: classes, specs, races, zones, and a set of real
   spells and items. For exact values, register real data with `sim:AddItem`, `sim:AddSpell` or `sim:Mock`.
-- **Blizzard's own UI** (action bars, unit frames and so on) exists as placeholder frames, not as working Blizzard
-  code.
+- **Blizzard's own UI** exists as placeholder frames, not as working Blizzard code. The main action bar, micro
+  menu and Settings window (with addon categories and vertical-layout controls) are drawn.
 - **Art downloads** need `git` and `curl`, and use POSIX shell tools. On Windows, use WSL or Git Bash.
 
 ## Tested against real addons
 
-- The **Ace3** library suite loads with no errors.
-- **BugSack** (which ships a `[AllowLoadGameType camelot]` Forever file) loads apart from libraries its git repo
-  doesn't contain.
-- **OmniCC** initialises and loads its on-demand config addon.
-- **Details!**, around 1,700 frames, loads and reports only genuine Forever incompatibilities in its own code.
+`wowtest install` fetches addons from GitHub and packages them the way the CurseForge/Wago packager does:
+`.pkgmeta` externals, `move-folders`, git submodules, and `@debug@` / `do-not-package` stripping. Then `check` or a
+script can drive them:
 
-Addons installed from git usually lack their embedded libraries. `check` points this out, so test the packaged
-release.
+```sh
+./wowtest install BigWigsMods/BigWigs tullamods/OmniCC Jaliborc/Bagnon Jaliborc/BagBrother
+./wowtest check .wowtest/AddOns/OmniCC --screenshot omnicc.png
+```
+
+Results from a run of 13 popular addons (a scripted scenario for each, then a screenshot):
+
+| Addon | Result |
+|---|---|
+| OmniCC | Runs cleanly: cooldown text on the action bar. |
+| AdvancedInterfaceOptions | Runs cleanly: its AceConfig pages open in the Settings window. |
+| BigWigs | Core, plugins and options load on demand; `/bw` opens the full options window. |
+| Bagnon (+ BagBrother) | Loads its whole library stack (Poncho, Sushi, WildAddon, C_Everywhere); 2 errors left. |
+| Details!, DBM, Hekili, Bartender4 | Load. Remaining errors are mostly libraries only on wowace/CurseForge, which this sandbox couldn't reach (`install` fetches them over svn/http elsewhere), plus missing CurseForge-injected translations. |
+| Kui Nameplates | **Genuinely incompatible with Forever**: it checks `select(4, GetBuildInfo()) >= 90000`, which is false at interface 16001, so it registers the removed `UNIT_HEALTH_FREQUENT` event and its login handler fails. |
+| Dominos | Its `.toc` has no 16001 interface and no `[Game]` = Camelot bar-state file, so on Forever you get the default bar. |
+| WeakAuras | Only ships Classic-flavor `.toc` files, so it isn't loaded (`INCOMPATIBLE`). |
 
 ## Layout
 

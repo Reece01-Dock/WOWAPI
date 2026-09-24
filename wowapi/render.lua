@@ -266,13 +266,16 @@ local function region(ctx, obj)
     local jh = s.justifyH or "CENTER"
     local anchor, tx = "middle", x + w / 2
     if jh == "LEFT" then anchor, tx = "start", x elseif jh == "RIGHT" then anchor, tx = "end", x + w end
-    local lines = layout.textLines(s.text)
+    local text = s.text
+    local ww = layout.wrapWidth(sim, obj, ((s.width or 0) > 0 or #s.points >= 2) and w or nil)
+    if ww then text = table.concat(layout.wrap(text, size, ww), "\n") end
+    local lines = layout.textLines(text)
     local ty
     local jv = s.justifyV or "MIDDLE"
     if jv == "TOP" then ty = y + size * 0.85
     elseif jv == "BOTTOM" then ty = y + h - (lines - 1) * size * 1.15 - size * 0.2
     else ty = y + h / 2 - (lines - 1) * size * 0.575 + size * 0.35 end
-    textSvg(ctx, tx, ty, s.text, size, rgb(tc[1], tc[2], tc[3]), anchor, alpha * (tc[4] or 1),
+    textSvg(ctx, tx, ty, text, size, rgb(tc[1], tc[2], tc[3]), anchor, alpha * (tc[4] or 1),
       flags and tostring(flags):find("OUTLINE"))
   end
 end

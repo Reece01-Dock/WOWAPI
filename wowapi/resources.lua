@@ -56,12 +56,22 @@ local EXTRA_FRAMES = { "MicroMenu", "MicroMenuContainer", "BagsBar", "MainAction
   "MainMenuBarBackpackButton", "CharacterBag0Slot", "CharacterBag1Slot", "CharacterBag2Slot", "CharacterBag3Slot",
   "CharacterReagentBag0Slot", "BagBarExpandToggle", "PlayerFrame", "TargetFrame", "FocusFrame", "PartyFrame",
   "BuffFrame", "DebuffFrame", "ObjectiveTrackerFrame", "MinimapCluster", "ChatFrameMenuButton", "UIWidgetTopCenterContainerFrame",
-  "MainMenuBarVehicleLeaveButton", "PaladinPowerBarFrame", "MonkHarmonyBarFrame", "RuneFrame", "TotemFrame" }
+  "MainMenuBarVehicleLeaveButton", "ChatFrameChannelButton", "ContainerFrameCombinedBags", "ContainerFrameContainer",
+  "ContainerFrame1", "ContainerFrame2", "ContainerFrame3", "ContainerFrame4", "ContainerFrame5", "ContainerFrame6",
+  "ContainerFrame7", "ContainerFrame8", "ContainerFrame9", "ContainerFrame10", "ContainerFrame11", "ContainerFrame12",
+  "ContainerFrame13", "BankFrame", "AccountBankPanel", "BankPanel", "GuildBankFrame", "VoidStorageFrame", "AddonListForceLoad", "PaladinPowerBarFrame", "MonkHarmonyBarFrame", "RuneFrame", "TotemFrame" }
+
+local MICRO_BUTTONS = { "CharacterMicroButton", "ProfessionMicroButton", "PlayerSpellsMicroButton",
+  "AchievementMicroButton", "QuestLogMicroButton", "HousingMicroButton", "GuildMicroButton", "LFDMicroButton",
+  "CollectionsMicroButton", "EJMicroButton", "StoreMicroButton", "MainMenuMicroButton" }
 
 local SHOWN_FRAMES = { PlayerFrame = true, MainMenuBar = true, MainActionBar = true, MinimapCluster = true,
   ChatFrame1 = true, ObjectiveTrackerFrame = true, BuffFrame = true, MicroMenu = true, BagsBar = true }
 
+local FRAME_TYPES = { AddonListForceLoad = "CheckButton" }
+
 local function frameTypeFor(name)
+  if FRAME_TYPES[name] then return FRAME_TYPES[name] end
   if name:find("Tooltip$") then return "GameTooltip" end
   if name:find("Button$") then return "Button" end
   if name:find("EditBox$") then return "EditBox" end
@@ -131,6 +141,14 @@ function M.actionButton(sim, name, id)
   b:SetNormalTexture("Interface\\Buttons\\UI-Quickslot2")
   b.NormalTexture = b:GetNormalTexture()
   b.action = id
+  -- the main bar sits at the bottom centre of the screen like the default UI
+  if name:find("^ActionButton") then
+    b:SetPoint("BOTTOMLEFT", rawget(env, "UIParent"), "BOTTOM", (id - 7) * 48 + 1, 24)
+    local ok, tex = pcall(env.GetActionTexture, id)
+    if ok and tex then b.icon:SetTexture(tex) end
+    b.HotKey:SetPoint("TOPRIGHT", -3, -4)
+    b.HotKey:SetText(id == 11 and "-" or id == 12 and "=" or tostring(id % 10))
+  end
   return b
 end
 
@@ -141,7 +159,8 @@ local VERB = { "Get", "Set", "Is", "Has", "Show", "Hide", "Update", "On", "Regis
   "Disable", "Add", "Remove", "Clear", "Refresh", "Layout", "Can", "Should", "Apply", "Setup", "SetUp", "Init",
   "Reset", "Toggle", "For", "Evaluate", "Acquire", "Release", "Open", "Close", "Play", "Stop", "Mark", "Try",
   "Handle", "Check", "Find", "Select", "Lock", "Unlock", "Begin", "End", "Start", "Cancel", "Load", "Save",
-  "Create", "Destroy", "Attach", "Detach", "Process", "Request", "Notify", "Trigger", "Fire", "Invoke", "Run" }
+  "Create", "Destroy", "Attach", "Detach", "Process", "Request", "Notify", "Trigger", "Fire", "Invoke", "Run",
+  "Generate", "Build", "Calculate", "Sort", "Filter", "Merge", "Queue", "Assign", "Release", "Resize", "Anchor" }
 local function looksLikeMethod(k)
   for _, v in ipairs(VERB) do
     if k:sub(1, #v) == v and (#k == #v or k:sub(#v + 1, #v + 1):match("[%u%d_]")) then return true end
@@ -156,6 +175,7 @@ M.looksLikeMethod = looksLikeMethod
 function M.blizzardFallback(sim, obj, label)
   local mt = getmetatable(obj)
   local base = mt.__index
+  sim.widgetState[obj].baseMeta = mt
   setmetatable(obj, { __tostring = mt.__tostring, __index = function(t, k)
     local v = type(base) == "table" and base[k] or nil
     if v ~= nil then return v end
@@ -170,6 +190,7 @@ function M.blizzardFallback(sim, obj, label)
     end
     local child = require("wowapi.widgets").create(sim, "Frame", nil, t)
     sim.widgetState[child].placeholder = true
+    sim.widgetState[child].autoChild = true
     sim.widgetState[child].shown = false
     M.blizzardFallback(sim, child, label .. "." .. k)
     rawset(t, k, child)
@@ -180,6 +201,21 @@ end
 function M.decorateFrame(sim, name, f)
   M.blizzardFallback(sim, f, name)
   if name == "NamePlateDriverFrame" then require("wowapi.nameplates").decorateDriver(sim, f) end
+  if name == "MicroMenu" then
+    -- MicroMenuMixin:GenerateButtonInfos lists the micro buttons in bar order
+    function f:GenerateButtonInfos()
+      local out = {}
+      for _, n in ipairs(MICRO_BUTTONS) do
+        local b = sim:Get(n)
+        if b then
+          local st = sim.widgetState[b]
+          st.shown, st.width, st.height = true, 32, 40
+          out[#out + 1] = { button = b }
+        end
+      end
+      return out
+    end
+  end
   if FRAME_REGISTRIES[name] then
     f.frames = {}
     function f:RegisterFrame(frame) table.insert(self.frames, frame) end
@@ -249,6 +285,7 @@ function M.install(sim, env)
   local function stub(label)
     return function()
       sim.stubbedCalls[label] = (sim.stubbedCalls[label] or 0) + 1
+      return nil
     end
   end
 
@@ -316,7 +353,12 @@ function M.install(sim, env)
     if type(k) == "string" then
       local bar, idx, suffix = k:match("^(%a-Button)(%d+)(%a*)$")
       if bar and ACTION_BARS[bar] and tonumber(idx) >= 1 and tonumber(idx) <= 12 then
-        local b = rawget(env, bar .. idx) or M.actionButton(sim, bar .. idx, tonumber(idx))
+        local b = rawget(env, bar .. idx)
+        if not b then
+          -- the whole bar exists at once, as in the client
+          for i = 1, 12 do if not rawget(env, bar .. i) then M.actionButton(sim, bar .. i, i) end end
+          b = rawget(env, bar .. idx)
+        end
         if suffix == "" then return b, true end
         local c = rawget(env, k)
         if c then return c, true end
@@ -341,6 +383,7 @@ function M.install(sim, env)
           return fn
         end
       end })
+      sim.blizzardTables[t] = k
       rawset(env, k, t)
       return t, true
     end

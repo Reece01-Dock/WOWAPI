@@ -73,6 +73,25 @@ function M.builtins(env)
     B[n] = checkText
   end
 
+  -- a row in an options category tree (AceGUI TreeGroup, legacy options)
+  B.OptionsListButtonTemplate = function(sim, obj, create)
+    local s = sim.widgetState[obj]
+    s.width, s.height = 175, 18
+    local fs = child(sim, create, "FontString", obj, "Text", "text", "ARTWORK")
+    fs:SetFontObject("GameFontNormal")
+    fs:SetJustifyH("LEFT")
+    fs:SetPoint("LEFT", 6, 0)
+    fs:SetPoint("RIGHT", -20, 0)
+    s.fontString = fs
+    local toggle = child(sim, create, "Button", obj, "Toggle", "toggle")
+    toggle:SetSize(14, 14)
+    toggle:SetPoint("TOPRIGHT", -6, -1)
+    toggle:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-UP")
+    toggle:SetPushedTexture("Interface\\Buttons\\UI-PlusButton-DOWN")
+    toggle:SetHighlightTexture("Interface\\Buttons\\UI-PlusButton-Hilight")
+    obj:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestLogTitleHighlight")
+  end
+
   local function slider(sim, obj, create)
     local s = sim.widgetState[obj]
     s.width, s.height = 144, 17

@@ -59,7 +59,8 @@ local LOOSE = { SetPoint = true, SetAllPoints = true, SetParent = true, SetText 
   SetTexture = true, SetNormalTexture = true, SetPushedTexture = true, SetHighlightTexture = true,
   SetDisabledTexture = true, SetCheckedTexture = true, SetStatusBarTexture = true, SetThumbTexture = true,
   SetFont = true, SetFontObject = true, SetNormalFontObject = true, SetHighlightFontObject = true,
-  SetDisabledFontObject = true, SetScript = true, HookScript = true, SetAttribute = true }
+  SetDisabledFontObject = true, SetScript = true, HookScript = true, SetAttribute = true,
+  SetStartPoint = true, SetEndPoint = true }
 
 -- Returns nil or an error message.
 local function check(name, args, argv, n, isMethod)
@@ -245,6 +246,7 @@ M.WIDGETS = {
   { "ScenarioPOIFrame", "Blob", { "FrameAPIScenarioPOI" } },
   { "Checkout", "Frame", { "FrameAPISimpleCheckout" } },
   { "AuraContainer", "Frame", {} },
+  { "ItemButton", "Button", {} },
   { "Font", "Object", { "SimpleFontAPI" } },
   { "AnimationGroup", "Object", { "SimpleAnimGroupAPI" } },
   { "Animation", "Object", { "SimpleAnimAPI" } },

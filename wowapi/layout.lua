@@ -41,6 +41,57 @@ function M.textWidth(text, size)
   return longest * size * 0.52
 end
 
+-- Word-wrap `text` to `width` pixels at font `size`. Returns the lines; a
+-- colour left open at a line break carries on at the start of the next.
+function M.wrap(text, size, width)
+  local out = {}
+  if not text or text == "" then return out end
+  -- the width estimate is approximate: allow a little overflow before
+  -- breaking, so text sized from its own GetStringWidth never wraps
+  if width then width = width * 1.08 + 2 end
+  for para in (text .. "\n"):gmatch("(.-)\n") do
+    if not width or width <= 0 or M.textWidth(para, size) <= width then
+      out[#out + 1] = para
+    else
+      local line = ""
+      for word in para:gmatch("%S+") do
+        local try = line == "" and word or (line .. " " .. word)
+        if line ~= "" and M.textWidth(try, size) > width then
+          out[#out + 1] = line
+          line = word
+        else
+          line = try
+        end
+      end
+      out[#out + 1] = line
+    end
+  end
+  -- carry open colour codes over line breaks
+  local open
+  for i, l in ipairs(out) do
+    if open then out[i] = open .. l end
+    for code in out[i]:gmatch("|c%x%x%x%x%x%x%x%x") do open = code end
+    local lastC = out[i]:match(".*()|c%x%x%x%x%x%x%x%x") or 0
+    local lastR = out[i]:match(".*()|r") or 0
+    if lastR > lastC then open = nil end
+  end
+  return out
+end
+
+-- Should this FontString wrap (it has a width and word wrap is on)?
+function M.wrapWidth(sim, obj, width)
+  local s = sim.widgetState[obj]
+  local ww = s.props and s.props.WordWrap
+  if ww and ww[1] == false then return nil end
+  return width
+end
+
+-- Line height and total height of `n` lines at font `size`.
+function M.linesHeight(n, size, spacing)
+  if n <= 0 then return 0 end
+  return n * size + (n - 1) * (spacing or 2)
+end
+
 function M.textLines(text)
   if not text or text == "" then return 0 end
   local _, n = text:gsub("\n", "")
@@ -110,18 +161,26 @@ function M.rect(sim, obj, visiting)
   local w, h = (s.width or 0) * es, (s.height or 0) * es
   local iw, ih = intrinsic(sim, obj, s)
   if w == 0 and iw then w = iw * es end
-  if h == 0 and ih then h = ih * es end
 
+  -- an edge anchor plus a centre anchor on the same axis only sizes the
+  -- region when it has no size of its own (AceGUI's TOPLEFT + RIGHT rows)
   local l, b
   if L and R then l, w = L, R - L
-  elseif L and CX then l, w = L, 2 * (CX - L)
-  elseif R and CX then w = 2 * (R - CX); l = R - w
+  elseif L and CX and w == 0 then l, w = L, 2 * (CX - L)
+  elseif R and CX and w == 0 then w = 2 * (R - CX); l = R - w
   elseif L then l = L
   elseif R then l = R - w
   else l = CX - w / 2 end
+  -- a FontString with a set width wraps, so it grows taller
+  if s.type == "FontString" and h == 0 and s.text and s.text ~= "" and ((s.width or 0) > 0 or (L and R)) then
+    local _, size = M.fontOf(sim, obj)
+    local ww = M.wrapWidth(sim, obj, w / es)
+    if ww then ih = M.linesHeight(#M.wrap(s.text, size, ww), size) end
+  end
+  if h == 0 and ih then h = ih * es end
   if T and B then b, h = B, T - B
-  elseif B and CY then b, h = B, 2 * (CY - B)
-  elseif T and CY then h = 2 * (T - CY); b = T - h
+  elseif B and CY and h == 0 then b, h = B, 2 * (CY - B)
+  elseif T and CY and h == 0 then h = 2 * (T - CY); b = T - h
   elseif B then b = B
   elseif T then b = T - h
   else b = CY - h / 2 end

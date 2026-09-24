@@ -66,6 +66,7 @@ function Sim:_reset()
   self.errors = {}
   self.warnings = {}
   self.stubbedCalls = {}
+  self.blizzardTables = setmetatable({}, { __mode = "k" })
   self.undefinedGlobals = {}
   self.createdGlobals = {}
   self.sounds = {}
@@ -325,9 +326,55 @@ function Sim:_resolveAddon(spec, hintDir)
   end
 end
 
+-- Every addon the client would list (C_AddOns.GetNumAddOns): the folders in
+-- the AddOns directories plus anything loaded from elsewhere, sorted by name.
+-- Entries are loaded addons or { name, dir, toc } for ones not loaded yet.
+function Sim:_installedAddons()
+  local seen, list = {}, {}
+  local function add(name, entry)
+    if seen[name] then return end
+    seen[name] = true
+    list[#list + 1] = entry
+  end
+  for _, name in ipairs(self.addonOrder) do add(name, self.addons[name]) end
+  self._scanned = self._scanned or {}
+  for _, d in ipairs(self.addonPaths) do
+    if not self._scanned[d] then
+      local found = {}
+      local p = io.popen('ls -1 "' .. d .. '" 2>/dev/null')
+      if p then
+        for n in p:lines() do
+          local dir = toc.join(d, n)
+          if toc.findToc(dir) then found[#found + 1] = { name = n, dir = dir } end
+        end
+        p:close()
+      end
+      self._scanned[d] = found
+    end
+    for _, e in ipairs(self._scanned[d]) do
+      if self.addons[e.name] then add(e.name, self.addons[e.name])
+      elseif not seen[e.name] then
+        if e.toc == nil then toc.LOCALE = self.locale; e.toc = toc.load(e.dir) or false end
+        if e.toc then add(e.name, e) end
+      end
+    end
+  end
+  table.sort(list, function(a, b) return a.name:lower() < b.name:lower() end)
+  return list
+end
+
+-- A loaded or installed addon by name or index.
+function Sim:_addonInfo(ref)
+  if type(ref) == "number" then return self:_installedAddons()[ref] end
+  if self.addons[ref] then return self.addons[ref] end
+  if type(ref) ~= "string" then return nil end
+  for _, e in ipairs(self:_installedAddons()) do if e.name == ref then return e end end
+end
+
 function Sim:_runFile(addon, path, ns)
   if path:lower():match("%.xml$") then
     require("wowapi.xml").loadFile(self, path, addon, function(p)
+      p = toc.resolve(p) or p
       if not toc.exists(p) then
         self:_error(string.format("%s: file referenced in %s not found: %s", addon.name, path, p))
       else
@@ -426,7 +473,7 @@ function Sim:LoadAddon(spec, _hintDir)
   local prev = self.currentAddon
   self.currentAddon = t.name
   for _, f in ipairs(t.files) do
-    local path = toc.join(dir, f)
+    local path = toc.resolve(toc.join(dir, f)) or toc.join(dir, f)
     if not toc.exists(path) then
       self:_error(string.format("%s: file listed in .toc not found: %s", t.name, f))
     else

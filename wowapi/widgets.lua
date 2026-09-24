@@ -589,10 +589,32 @@ function M.install(sim, env)
   function FS:GetJustifyH() return S(self).justifyH or "CENTER" end
   function FS:SetJustifyV(v) S(self).justifyV = v end
   function FS:GetJustifyV() return S(self).justifyV or "MIDDLE" end
-  function FS:GetStringWidth() return #(S(self).text or "") * 6 end
-  function FS:GetStringHeight() return 12 end
-  function FS:GetUnboundedStringWidth() return self:GetStringWidth() end
-  function FS:GetNumLines() return 1 end
+  -- text metrics from the layout engine (wrapped to the region's width)
+  local function wrapped(self)
+    local st = S(self)
+    local _, size = layout.fontOf(sim, self)
+    local width
+    if (st.width or 0) > 0 or #st.points >= 2 then
+      local _, _, w = layout.rect(sim, self)
+      width = w and layout.wrapWidth(sim, self, w)
+    end
+    return layout.wrap(st.text, size, width), size
+  end
+  function FS:GetUnboundedStringWidth()
+    local _, size = layout.fontOf(sim, self)
+    return layout.textWidth(S(self).text, size)
+  end
+  function FS:GetStringWidth()
+    local lines, size = wrapped(self)
+    local w = 0
+    for _, l in ipairs(lines) do w = math.max(w, layout.textWidth(l, size)) end
+    return w
+  end
+  function FS:GetStringHeight()
+    local lines, size = wrapped(self)
+    return layout.linesHeight(#lines, size)
+  end
+  function FS:GetNumLines() return #(wrapped(self)) end
   function FS:IsTruncated() return false end
 
   ---------------------------------------------------------------- Texture

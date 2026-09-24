@@ -340,7 +340,8 @@ end
 -- Run a secure snippet with the named arguments bound.
 function M.runSnippet(sim, frame, body, argNames, ...)
   if type(body) ~= "string" then return end
-  local src = "local " .. (argNames or "self") .. " = ...\n" .. body
+  -- compiled as a function of the named arguments (which may end in `...`)
+  local src = "return (function(" .. (argNames or "self") .. ") " .. body .. "\nend)(...)"
   local env = restrictedEnv(sim, frame)
   local fn, err = compat.loadstring(src, "=(snippet " .. tostring(frame:GetName() or "?") .. ")", env)
   if not fn then sim:_error(err); return end
